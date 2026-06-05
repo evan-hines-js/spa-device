@@ -1,0 +1,8 @@
+# Build for the BPF target with a freshly built `core` (bpf has no prebuilt std).
+# bpf-linker (in PATH on the build host) is selected automatically by the
+# bpfel-unknown-none target.
+[build]
+target = "bpfel-unknown-none"
+
+[unstable]
+build-std = ["core"]

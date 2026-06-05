@@ -1,0 +1,27 @@
+[package]
+name = "spa-ebpf"
+version = "0.1.0"
+edition = "2021"
+
+# The XDP data plane. Built ONLY for the BPF target (bpfel-unknown-none) on the
+# Linux build host — excluded from the workspace so the macOS userland build
+# stays green. Parsing is dependency-free and every read is bounds-checked; the
+# decision logic it relies on (Grant::allows_port, expiry) lives in the tested
+# spa-ebpf-common. See DESIGN.md §3.
+
+[dependencies]
+aya-ebpf = "0.1"
+spa-ebpf-common = { path = "../spa-ebpf-common" }
+
+[[bin]]
+name = "spa-gate"
+path = "src/main.rs"
+
+[profile.dev]
+opt-level = 3
+debug = false
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
