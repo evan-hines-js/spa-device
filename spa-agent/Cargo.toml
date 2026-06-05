@@ -1,0 +1,25 @@
+[package]
+name = "spa-agent"
+version = "0.1.0"
+edition = "2021"
+
+# The workstation client agent: reach mesh services by name (the counterpart to
+# spa-gated). It fetches the device's signed service catalog from the control
+# plane, then — TUN datapath, in progress — knocks each service's gate per flow
+# and forwards through the pinhole. Cross-platform userland. See
+# argus-questions/006.
+
+[dependencies]
+spa-common = { path = "../spa-common" }
+spa-crypto = { path = "../spa-crypto" }
+spa-client = { path = "../spa-client" }
+hex = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Catalog fetch over HTTPS — rustls on the shared aws-lc-rs provider (the
+# -no-provider feature drops reqwest's default `ring`, so no second crypto stack).
+reqwest = { version = "0.12", default-features = false, features = [
+    "blocking",
+    "rustls-tls-webpki-roots-no-provider",
+] }
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std", "tls12", "logging"] }

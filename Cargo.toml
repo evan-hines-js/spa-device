@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["spa-common", "spa-core", "spa-crypto", "spa-ebpf-common", "spa-client"]
+members = ["spa-common", "spa-core", "spa-crypto", "spa-ebpf-common", "spa-client", "spa-agent"]
 # spa-ebpf (BPF target) and spa-gated (the aya-based daemon, Linux-only) are
 # excluded so the macOS userland build/test stays green. Both build on the Linux
 # build host.
