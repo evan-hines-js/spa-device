@@ -23,6 +23,7 @@ pub fn install_floor(protected: &[u16]) -> std::io::Result<()> {
          \x20 set ports { type inet_service; }\n\
          \x20 chain input {\n\
          \x20   type filter hook input priority filter; policy accept;\n\
+         \x20   iif \"lo\" accept\n\
          \x20   ct state established,related accept\n\
          \x20   tcp dport @ports ip saddr @allow4 accept\n\
          \x20   tcp dport @ports ip6 saddr @allow6 accept\n\
