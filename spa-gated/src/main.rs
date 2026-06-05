@@ -83,8 +83,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         eprintln!("[spa] nftables fail-closed floor installed");
     }
 
-    // Take the allow-list map for the gate writer to own.
-    let allow: BpfHashMap<_, u32, Grant> =
+    // Take the allow-list map for the gate writer to own (16-byte address keys).
+    let allow: BpfHashMap<_, [u8; 16], Grant> =
         BpfHashMap::try_from(ebpf.take_map("ALLOW").ok_or("missing map ALLOW")?)?;
 
     // Build the decision core with real adapters.
@@ -129,8 +129,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     // Knock loop. `ebpf` is held for the process lifetime to keep the program
-    // attached.
-    let sock = UdpSocket::bind(("0.0.0.0", cfg.knock_port))?;
+    // attached. Prefer a dual-stack `[::]` socket (receives both IPv6 and
+    // IPv4-mapped IPv4); fall back to IPv4-only where IPv6 is unavailable.
+    let sock = UdpSocket::bind(("::", cfg.knock_port))
+        .or_else(|_| UdpSocket::bind(("0.0.0.0", cfg.knock_port)))?;
     eprintln!("[spa] listening for knocks on udp/{}", cfg.knock_port);
     let mut buf = [0u8; 1500];
     loop {

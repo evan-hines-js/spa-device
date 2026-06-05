@@ -9,7 +9,7 @@
 use std::collections::HashMap;
 use std::error::Error;
 use std::fs;
-use std::net::UdpSocket;
+use std::net::{ToSocketAddrs, UdpSocket};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use spa_common::{Suite, GATE_ID_LEN, NONCE_LEN, THUMBPRINT_LEN};
@@ -46,8 +46,13 @@ fn main() -> Result<(), Box<dyn Error>> {
         ),
         _ => {
             eprintln!(
-                "usage: spa-client [keygen <prefix> | knock <addr:port> <file> | \
-                 gen-anchor <prefix> | sign-bundle <anchor.key> <payload.toml> <out.bundle>]"
+                "usage: spa-client <command>\n  \
+                 keygen <prefix> [fips|modern]\n  \
+                 knock <addr:port> <file>\n  \
+                 gen-token <prefix>\n  \
+                 enroll-knock <addr:port> <knockfile> <enrollfile>\n  \
+                 gen-anchor <prefix>\n  \
+                 sign-bundle <anchor.key> <payload.toml> <out.bundle>"
             );
             Ok(())
         }
@@ -164,6 +169,22 @@ fn now_nanos() -> Result<u64, Box<dyn Error>> {
     Ok(SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos() as u64)
 }
 
+/// Send one datagram, binding a socket of the target's address family (so v6
+/// targets work, not just v4).
+fn send_udp(packet: &[u8], target: &str) -> Result<(), Box<dyn Error>> {
+    let addr = target
+        .to_socket_addrs()?
+        .next()
+        .ok_or("could not resolve target")?;
+    let bind = if addr.is_ipv6() {
+        "[::]:0"
+    } else {
+        "0.0.0.0:0"
+    };
+    UdpSocket::bind(bind)?.send_to(packet, addr)?;
+    Ok(())
+}
+
 fn knock(target: &str, file: &str) -> Result<(), Box<dyn Error>> {
     let kv = read_kv(file)?;
     let gate_pubkey = hex::decode(require(&kv, "gate_pubkey_hex")?)?;
@@ -182,7 +203,7 @@ fn knock(target: &str, file: &str) -> Result<(), Box<dyn Error>> {
     };
     let packet = client.seal(&gate_pubkey, &req)?;
 
-    UdpSocket::bind("0.0.0.0:0")?.send_to(&packet, target)?;
+    send_udp(&packet, target)?;
     println!(
         "sent {}-byte knock to {target} (requesting port {port})",
         packet.len()
@@ -238,7 +259,7 @@ fn enroll_knock(target: &str, knockfile: &str, enrollfile: &str) -> Result<(), B
     };
     let packet = seal_psk(&gate_pubkey, suite, &secret, token_id, &req)?;
 
-    UdpSocket::bind("0.0.0.0:0")?.send_to(&packet, target)?;
+    send_udp(&packet, target)?;
     println!(
         "sent {}-byte enrollment knock to {target} (requesting port {port})",
         packet.len()

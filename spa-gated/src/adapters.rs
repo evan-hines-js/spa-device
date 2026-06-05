@@ -127,18 +127,12 @@ impl TrustStore for SharedTrust {
 /// Gate writer that programs the kernel allow-list (the `ALLOW` BPF map) and,
 /// when enabled, mirrors the grant into the nftables fail-closed floor.
 pub struct BpfGateWriter {
-    pub allow: BpfHashMap<MapData, u32, Grant>,
+    pub allow: BpfHashMap<MapData, [u8; 16], Grant>,
     pub nft_floor: bool,
 }
 
 impl GateWriter for BpfGateWriter {
     fn open(&mut self, source: IpAddr, ports: &[u16], ttl_nanos: u64) {
-        // The XDP key is the IPv4 source as it sits in the packet, read as a
-        // native u32 — match that exactly. IPv6 is not yet cloaked.
-        let v4 = match source {
-            IpAddr::V4(v4) => v4,
-            IpAddr::V6(_) => return,
-        };
         let mut grant = Grant {
             expiry_ns: monotonic_now_ns().saturating_add(ttl_nanos),
             ports: [0; MAX_GRANT_PORTS],
@@ -151,10 +145,19 @@ impl GateWriter for BpfGateWriter {
         }
         // A failed map write just means this knock doesn't open the port; the
         // client can retry. Never panic in the hot path.
-        let _ = self.allow.insert(u32::from_ne_bytes(v4.octets()), grant, 0);
+        let _ = self.allow.insert(addr_key(source), grant, 0);
         if self.nft_floor {
-            crate::nft::allow(v4, ttl_nanos.div_ceil(1_000_000_000));
+            crate::nft::allow(source, ttl_nanos.div_ceil(1_000_000_000));
         }
+    }
+}
+
+/// The 16-byte BPF allow-list key: IPv6 verbatim, IPv4 as its IPv4-mapped form
+/// `::ffff:a.b.c.d` (matching how the XDP program keys both families).
+fn addr_key(source: IpAddr) -> [u8; 16] {
+    match source {
+        IpAddr::V4(v4) => v4.to_ipv6_mapped().octets(),
+        IpAddr::V6(v6) => v6.octets(),
     }
 }
 
