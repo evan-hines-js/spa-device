@@ -105,9 +105,9 @@ sleep 3
 knock
 assert "wrong-anchor bundle is rejected" BLOCKED "$(connect)"
 
-assert "applied generation 2" 1 "$(grep -c 'applied bundle generation 2' "$WORK/gated.log")"
-assert "ignored the rollback" 1 "$(grep -c 'ignored bundle generation 1' "$WORK/gated.log")"
-assert "rejected the wrong-anchor bundle" 1 "$(grep -c 'rejected bundle' "$WORK/gated.log")"
+assert "applied generation 2" 1 "$(grep -c '"action":"applied"' "$WORK/gated.log")"
+assert "ignored the rollback" 1 "$(grep -c '"action":"ignored"' "$WORK/gated.log")"
+assert "rejected the wrong-anchor bundle" 1 "$(grep -c '"action":"rejected"' "$WORK/gated.log")"
 
-echo "== bundle log =="; grep -E "loaded|applied|ignored|rejected" "$WORK/gated.log" | sed 's/^/  /'
+echo "== bundle log =="; grep '"event":"bundle"' "$WORK/gated.log" | sed 's/^/  /'
 if [ "$FAILS" -eq 0 ]; then echo "== ALL PASS =="; exit 0; else echo "== $FAILS FAILED =="; exit 1; fi

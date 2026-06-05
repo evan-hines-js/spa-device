@@ -76,8 +76,8 @@ assert "one-time token opens the port" CONNECTED "$(connect)"
 sleep 1.5  # let the grant expire
 "$CLI" enroll-knock "$GATE:$KNOCK_PORT" "$WORK/legit.knock" "$WORK/tok.enroll" >/dev/null; sleep 0.4
 assert "reused token is rejected (burned)" BLOCKED "$(connect)"
-assert "exactly one enrollment accepted" 1 "$(grep -c OPEN "$WORK/gated.log")"
+assert "exactly one enrollment accepted" 1 "$(grep -c '"outcome":"open"' "$WORK/gated.log")"
 assert "reused token logged UnknownClient" 1 "$(grep -c UnknownClient "$WORK/gated.log")"
 
-echo "== daemon decisions =="; grep -E "OPEN|DENY|token" "$WORK/gated.log" | sed 's/^/  /'
+echo "== daemon decisions =="; grep '"event":"knock"' "$WORK/gated.log" | sed 's/^/  /'
 if [ "$FAILS" -eq 0 ]; then echo "== ALL PASS =="; exit 0; else echo "== $FAILS FAILED =="; exit 1; fi

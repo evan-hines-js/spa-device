@@ -87,6 +87,6 @@ assert "undersized knocks dropped in-kernel" "$BEFORE" "$(seen)"
 # A legit knock after the window resets is still accepted.
 sleep 1.2
 "$CLI" knock "$GATE:$KNOCK_PORT" "$WORK/legit.knock" >/dev/null; sleep 0.5
-assert "legit knock still accepted after flood" 1 "$(grep -c OPEN "$WORK/gated.log")"
+assert "legit knock still accepted after flood" 1 "$(grep -c '"outcome":"open"' "$WORK/gated.log")"
 
 if [ "$FAILS" -eq 0 ]; then echo "== ALL PASS =="; exit 0; else echo "== $FAILS FAILED =="; exit 1; fi

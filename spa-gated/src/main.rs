@@ -4,6 +4,7 @@
 //! hot-reloaded bundle.
 
 mod adapters;
+mod audit;
 mod bundle;
 mod config;
 mod nft;
@@ -17,7 +18,8 @@ use aya::maps::{Array as BpfArray, HashMap as BpfHashMap, MapData};
 use aya::programs::{Xdp, XdpFlags};
 use aya::Ebpf;
 
-use spa_core::{Config as GateConfig, Decision, Gatekeeper};
+use spa_common::Suite;
+use spa_core::{Config as GateConfig, Gatekeeper};
 use spa_crypto::GateKeypair;
 use spa_ebpf_common::{GateConfig as KernelConfig, Grant};
 
@@ -38,7 +40,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let (clients, ports, generation): (Vec<ClientEntry>, Vec<u16>, u64) = match &bundle_src {
         Some((anchor, bpath)) => {
             let b = bundle::load_verify(bpath, anchor)?;
-            eprintln!("[spa] loaded signed bundle generation {}", b.generation);
+            audit::bundle("loaded", Some(b.generation), None);
             (b.clients, b.protected_ports, b.generation)
         }
         None => (cfg.clients.clone(), cfg.protected_ports.clone(), 0),
@@ -53,7 +55,6 @@ fn main() -> Result<(), Box<dyn Error>> {
             .try_into()?;
         prog.load()?;
         prog.attach(&cfg.interface, XdpFlags::SKB_MODE)?;
-        eprintln!("[spa] attached spa_gate to {}", cfg.interface);
     }
 
     // Tell the data plane the knock port so it can size-filter + rate-limit it.
@@ -76,11 +77,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     for p in &ports {
         protected.insert(*p, 1u8, 0)?;
     }
-    eprintln!("[spa] cloaking tcp ports {ports:?}");
 
     if cfg.nftables_floor {
         nft::install_floor(&ports)?;
-        eprintln!("[spa] nftables fail-closed floor installed");
+        audit::floor(&ports);
     }
 
     // Take the allow-list map for the gate writer to own (16-byte address keys).
@@ -92,12 +92,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     let trust = SharedTrust::new(cfg.suite);
     trust.set(&clients);
     trust.set_tokens(&cfg.tokens);
-    if !cfg.tokens.is_empty() {
-        eprintln!(
-            "[spa] loaded {} one-time enrollment token(s)",
-            cfg.tokens.len()
-        );
-    }
     let replay = MemReplay::new(Duration::from_secs(cfg.skew_seconds * 2 + 1));
     let gate_cfg = GateConfig {
         gate_id: cfg.gate_id,
@@ -133,14 +127,25 @@ fn main() -> Result<(), Box<dyn Error>> {
     // IPv4-mapped IPv4); fall back to IPv4-only where IPv6 is unavailable.
     let sock = UdpSocket::bind(("::", cfg.knock_port))
         .or_else(|_| UdpSocket::bind(("0.0.0.0", cfg.knock_port)))?;
-    eprintln!("[spa] listening for knocks on udp/{}", cfg.knock_port);
+    let suite = match cfg.suite {
+        Suite::Fips => "fips",
+        Suite::Modern => "modern",
+    };
+    audit::startup(
+        &cfg.interface,
+        cfg.knock_port,
+        suite,
+        &ports,
+        clients.len(),
+        cfg.tokens.len(),
+        cfg.nftables_floor,
+    );
+
     let mut buf = [0u8; 1500];
     loop {
         let (n, src) = sock.recv_from(&mut buf)?;
-        match gatekeeper.admit(&buf[..n], src.ip()) {
-            Decision::Opened { ports } => eprintln!("[spa] OPEN  {} -> {:?}", src.ip(), ports),
-            Decision::Rejected(reason) => eprintln!("[spa] DENY  {} ({:?})", src.ip(), reason),
-        }
+        let decision = gatekeeper.admit(&buf[..n], src.ip());
+        audit::knock(src.ip(), &decision);
     }
 }
 
@@ -172,14 +177,15 @@ fn watch_bundle(
         let b = match bundle::load_verify(&bundle_path, &anchor) {
             Ok(b) => b,
             Err(e) => {
-                eprintln!("[spa] rejected bundle: {e}");
+                audit::bundle("rejected", None, Some(e.to_string()));
                 continue;
             }
         };
         if b.generation <= applied_gen {
-            eprintln!(
-                "[spa] ignored bundle generation {} (<= applied {applied_gen})",
-                b.generation
+            audit::bundle(
+                "ignored",
+                Some(b.generation),
+                Some(format!("<= applied {applied_gen}")),
             );
             continue;
         }
@@ -197,10 +203,14 @@ fn watch_bundle(
         }
         known_ports = new_ports;
         applied_gen = b.generation;
-        eprintln!(
-            "[spa] applied bundle generation {applied_gen} ({} clients, ports {:?})",
-            b.clients.len(),
-            b.protected_ports
+        audit::bundle(
+            "applied",
+            Some(applied_gen),
+            Some(format!(
+                "{} clients, ports {:?}",
+                b.clients.len(),
+                b.protected_ports
+            )),
         );
     }
 }

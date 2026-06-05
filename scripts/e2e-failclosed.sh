@@ -69,7 +69,7 @@ connect() { timeout 4 curl --connect-timeout 3 -s -o /dev/null "http://$GATE:$PO
 assert() { if [ "$2" = "$3" ]; then echo "  PASS: $1"; else echo "  FAIL: $1 (expected $2, got $3)"; FAILS=$((FAILS + 1)); fi; }
 
 echo "== assertions =="
-assert "floor installed" 1 "$(grep -c 'floor installed' "$WORK/gated.log")"
+assert "floor installed" 1 "$(grep -c '"event":"floor"' "$WORK/gated.log")"
 "$CLI" knock "$GATE:$KNOCK_PORT" "$WORK/legit.knock" >/dev/null; sleep 0.3
 assert "valid knock connects" CONNECTED "$(connect)"
 

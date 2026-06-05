@@ -79,7 +79,7 @@ assert "slow download survives pinhole close" "$SIZE" "$GOT"
 # Pinhole closed long ago now; a new connection (no re-knock) must be dropped.
 NEW=$(timeout 4 curl --connect-timeout 3 -s -o /dev/null "http://$GATE:$PORT/" && echo CONNECTED || echo BLOCKED)
 assert "new connection after pinhole is cloaked" BLOCKED "$NEW"
-assert "exactly one knock accepted" 1 "$(grep -c 'OPEN' "$WORK/gated.log")"
+assert "exactly one knock accepted" 1 "$(grep -c '"outcome":"open"' "$WORK/gated.log")"
 
-echo "== daemon decisions =="; grep -E "OPEN|DENY" "$WORK/gated.log" | sed 's/^/  /'
+echo "== daemon decisions =="; grep '"event":"knock"' "$WORK/gated.log" | sed 's/^/  /'
 if [ "$FAILS" -eq 0 ]; then echo "== ALL PASS =="; exit 0; else echo "== $FAILS FAILED =="; exit 1; fi

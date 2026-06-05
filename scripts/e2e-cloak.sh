@@ -105,9 +105,9 @@ assert "valid knock opens the port"          CONNECTED "$(connect)"
 # UnknownClient, valid => 1 OPEN)
 assert "two Undecryptable denials"      2 "$(grep -c 'Undecryptable' "$WORK/gated.log")"
 assert "one UnknownClient denial"       1 "$(grep -c 'UnknownClient' "$WORK/gated.log")"
-assert "one OPEN"                        1 "$(grep -c 'OPEN' "$WORK/gated.log")"
+assert "one OPEN"                        1 "$(grep -c '"outcome":"open"' "$WORK/gated.log")"
 
 echo "== daemon decisions =="
-grep -E "OPEN|DENY" "$WORK/gated.log" | sed 's/^/  /'
+grep '"event":"knock"' "$WORK/gated.log" | sed 's/^/  /'
 
 if [ "$FAILS" -eq 0 ]; then echo "== ALL PASS =="; exit 0; else echo "== $FAILS FAILED =="; exit 1; fi

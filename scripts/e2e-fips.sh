@@ -71,7 +71,7 @@ echo "== assertions (suite = fips) =="
 assert "no knock is cloaked" BLOCKED "$(connect)"
 "$CLI" knock "$GATE:$KNOCK_PORT" "$WORK/legit.knock" >/dev/null; sleep 0.5
 assert "valid FIPS knock opens the port" CONNECTED "$(connect)"
-assert "daemon accepted one FIPS knock" 1 "$(grep -c OPEN "$WORK/gated.log")"
+assert "daemon accepted one FIPS knock" 1 "$(grep -c '"outcome":"open"' "$WORK/gated.log")"
 
-echo "== daemon decisions =="; grep -E "OPEN|DENY" "$WORK/gated.log" | sed 's/^/  /'
+echo "== daemon decisions =="; grep '"event":"knock"' "$WORK/gated.log" | sed 's/^/  /'
 if [ "$FAILS" -eq 0 ]; then echo "== ALL PASS =="; exit 0; else echo "== $FAILS FAILED =="; exit 1; fi
