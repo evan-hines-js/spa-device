@@ -338,17 +338,14 @@ impl ClientKey {
         })
     }
 
-    /// Export the client key as PKCS#8 for persistence. Ed25519 only; ECDSA
-    /// P-256 keys must be provisioned as DER (aws-lc-rs has no ECDSA export).
+    /// Export the client key as PKCS#8 for persistence. Both suites round-trip
+    /// with [`from_pkcs8`](Self::from_pkcs8).
     pub fn to_pkcs8(&self) -> Result<Vec<u8>, CryptoError> {
-        match &self.signer {
-            Signer::Ed25519(kp) => Ok(kp
-                .to_pkcs8()
-                .map_err(|_| CryptoError::Key)?
-                .as_ref()
-                .to_vec()),
-            Signer::Ecdsa(_) => Err(CryptoError::Key),
-        }
+        let doc = match &self.signer {
+            Signer::Ed25519(kp) => kp.to_pkcs8().map_err(|_| CryptoError::Key)?,
+            Signer::Ecdsa(kp) => kp.to_pkcs8v1().map_err(|_| CryptoError::Key)?,
+        };
+        Ok(doc.as_ref().to_vec())
     }
 
     pub fn public_key(&self) -> &[u8] {
@@ -502,18 +499,14 @@ mod tests {
     }
 
     #[test]
-    fn client_pkcs8_round_trips_modern() {
-        let client = ClientKey::generate(Suite::Modern).unwrap();
-        let pkcs8 = client.to_pkcs8().unwrap();
-        let reloaded = ClientKey::from_pkcs8(Suite::Modern, &pkcs8).unwrap();
-        assert_eq!(client.thumbprint(), reloaded.thumbprint());
-        assert_eq!(client.public_key(), reloaded.public_key());
-    }
-
-    #[test]
-    fn client_fips_export_unsupported_but_import_works() {
-        let client = ClientKey::generate(Suite::Fips).unwrap();
-        assert!(client.to_pkcs8().is_err());
+    fn client_pkcs8_round_trips() {
+        for suite in [Suite::Fips, Suite::Modern] {
+            let client = ClientKey::generate(suite).unwrap();
+            let pkcs8 = client.to_pkcs8().unwrap();
+            let reloaded = ClientKey::from_pkcs8(suite, &pkcs8).unwrap();
+            assert_eq!(client.thumbprint(), reloaded.thumbprint());
+            assert_eq!(client.public_key(), reloaded.public_key());
+        }
     }
 
     #[test]

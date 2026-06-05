@@ -18,7 +18,10 @@ use spa_crypto::{ClientKey, GateKeypair};
 fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(String::as_str) {
-        Some("keygen") => keygen(args.get(2).ok_or("usage: keygen <prefix>")?),
+        Some("keygen") => keygen(
+            args.get(2).ok_or("usage: keygen <prefix> [fips|modern]")?,
+            args.get(3).map(String::as_str).unwrap_or("modern"),
+        ),
         Some("knock") => knock(
             args.get(2).ok_or("usage: knock <addr:port> <file>")?,
             args.get(3).ok_or("usage: knock <addr:port> <file>")?,
@@ -73,8 +76,8 @@ fn random<const N: usize>() -> Result<[u8; N], Box<dyn Error>> {
     Ok(b)
 }
 
-fn keygen(prefix: &str) -> Result<(), Box<dyn Error>> {
-    let suite = Suite::Modern;
+fn keygen(prefix: &str, suite_name: &str) -> Result<(), Box<dyn Error>> {
+    let suite = parse_suite(suite_name)?;
     let (gate, gate_raw) = GateKeypair::generate_raw(suite)?;
     let client = ClientKey::generate(suite)?;
     let pkcs8 = client.to_pkcs8()?;
@@ -84,7 +87,7 @@ fn keygen(prefix: &str) -> Result<(), Box<dyn Error>> {
     fs::write(
         format!("{prefix}.gate.toml"),
         format!(
-            "suite = \"modern\"\n\
+            "suite = \"{suite_name}\"\n\
              gate_private_hex = \"{}\"\n\
              gate_id_hex = \"{}\"\n\n\
              [[client]]\n\
@@ -101,7 +104,7 @@ fn keygen(prefix: &str) -> Result<(), Box<dyn Error>> {
     fs::write(
         format!("{prefix}.knock"),
         format!(
-            "suite=modern\n\
+            "suite={suite_name}\n\
              gate_pubkey_hex={}\n\
              gate_id_hex={}\n\
              client_pkcs8_hex={}\n\
@@ -112,8 +115,16 @@ fn keygen(prefix: &str) -> Result<(), Box<dyn Error>> {
         ),
     )?;
 
-    println!("wrote {prefix}.gate.toml and {prefix}.knock (suite=modern, port={port})");
+    println!("wrote {prefix}.gate.toml and {prefix}.knock (suite={suite_name}, port={port})");
     Ok(())
+}
+
+fn parse_suite(s: &str) -> Result<Suite, Box<dyn Error>> {
+    match s {
+        "fips" => Ok(Suite::Fips),
+        "modern" => Ok(Suite::Modern),
+        other => Err(format!("unknown suite {other:?} (use fips|modern)").into()),
+    }
 }
 
 fn knock(target: &str, file: &str) -> Result<(), Box<dyn Error>> {
@@ -135,8 +146,9 @@ fn knock(target: &str, file: &str) -> Result<(), Box<dyn Error>> {
     gate_id.copy_from_slice(&gate_id_v);
     let pkcs8 = hex::decode(get("client_pkcs8_hex")?)?;
     let port: u16 = get("port")?.parse()?;
+    let suite = parse_suite(&get("suite")?)?;
 
-    let client = ClientKey::from_pkcs8(Suite::Modern, &pkcs8)?;
+    let client = ClientKey::from_pkcs8(suite, &pkcs8)?;
     let nonce: [u8; NONCE_LEN] = random()?;
     let ts = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos() as u64;
     let packet = client.seal(&gate_pubkey, gate_id, &[port], nonce, ts)?;
