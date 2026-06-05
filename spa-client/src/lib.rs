@@ -2,28 +2,37 @@
 //! connect.
 //!
 //! ```no_run
+//! use std::net::TcpStream;
 //! use spa_client::Knocker;
 //! # fn run() -> Result<(), spa_client::Error> {
 //! // Provisioned out of band (enrollment/config), or loaded from a keygen file:
 //! let (knocker, ports) = Knocker::from_knock_file("demo.knock")?;
-//! knocker.knock("gate.example:62201", &ports)?; // those ports are now reachable from us
-//! // ...now connect to the service as usual...
+//! // Knock, then connect — retried with a fresh knock if the first try races:
+//! let stream = knocker.with_open("gate.example:62201", &ports, 3, || {
+//!     TcpStream::connect("gate.example:22")
+//! })?;
+//! # let _ = stream;
 //! # Ok(()) }
 //! ```
 //!
 //! For production, build a [`Knocker`] with [`Knocker::new`] from material your
 //! control plane provisioned (the gate's public key + id, and your client key as
-//! PKCS#8). The one-time-token bootstrap is [`Enroller`].
+//! PKCS#8). The one-time-token bootstrap is [`Enroller`]. Use the lower-level
+//! [`Knocker::knock`] if you want to drive the connection yourself (e.g. async).
 
 use std::collections::HashMap;
 use std::fmt;
 use std::fs;
 use std::net::{ToSocketAddrs, UdpSocket};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub use spa_common::Suite;
 use spa_common::{GATE_ID_LEN, THUMBPRINT_LEN};
 use spa_crypto::{seal_psk, ClientKey, KnockRequest};
+
+/// Grace after a knock before connecting, so the gate can program its allow-list
+/// before the SYN arrives.
+const KNOCK_GRACE_MS: u64 = 30;
 
 /// Errors from building or sending a knock.
 #[derive(Debug)]
@@ -31,6 +40,9 @@ pub enum Error {
     Crypto(spa_crypto::CryptoError),
     Io(std::io::Error),
     Format(String),
+    /// Knock(s) were sent but the target was still unreachable (the inner string
+    /// is the last connect error from [`Knocker::with_open`]).
+    Unreachable(String),
 }
 
 impl fmt::Display for Error {
@@ -39,6 +51,7 @@ impl fmt::Display for Error {
             Error::Crypto(e) => write!(f, "crypto: {e}"),
             Error::Io(e) => write!(f, "io: {e}"),
             Error::Format(s) => write!(f, "{s}"),
+            Error::Unreachable(s) => write!(f, "unreachable after knocking: {s}"),
         }
     }
 }
@@ -115,6 +128,36 @@ impl Knocker {
     /// Seal and send one knock to `target` (`"host:port"` or `"[v6]:port"`).
     pub fn knock(&self, target: &str, ports: &[u16]) -> Result<(), Error> {
         send_udp(&self.seal(ports)?, target)
+    }
+
+    /// Knock, then run `connect` while the port is open, returning its value.
+    ///
+    /// Knocks before each attempt and retries up to `attempts` times: a UDP
+    /// knock can be lost and the pinhole is brief, so a transient failure is
+    /// retried with a fresh knock. A short grace lets the gate program its
+    /// allow-list before `connect` runs, avoiding a SYN-beats-the-grant race.
+    /// `connect` may therefore run more than once, so keep it idempotent.
+    pub fn with_open<T, E, F>(
+        &self,
+        target: &str,
+        ports: &[u16],
+        attempts: u32,
+        mut connect: F,
+    ) -> Result<T, Error>
+    where
+        F: FnMut() -> Result<T, E>,
+        E: fmt::Display,
+    {
+        let mut last = String::new();
+        for _ in 0..attempts.max(1) {
+            self.knock(target, ports)?;
+            std::thread::sleep(Duration::from_millis(KNOCK_GRACE_MS));
+            match connect() {
+                Ok(value) => return Ok(value),
+                Err(e) => last = e.to_string(),
+            }
+        }
+        Err(Error::Unreachable(last))
     }
 }
 

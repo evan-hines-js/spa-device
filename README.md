@@ -125,17 +125,23 @@ The daemon emits a JSON audit line per decision:
 knock before you dial, instead of shelling out:
 
 ```rust
+use std::net::TcpStream;
 use spa_client::Knocker;
 
 // Provisioned out of band (enrollment/config), or loaded from a keygen file:
 let knocker = Knocker::new(suite, gate_pubkey, gate_id, &client_pkcs8)?;
-knocker.knock("gate.example:62201", &[22])?;   // port 22 is now reachable from us
-// ...now open your connection as usual...
+
+// Knock, then connect — retried with a fresh knock if the first try races:
+let stream = knocker.with_open("gate.example:62201", &[22], 3, || {
+    TcpStream::connect("gate.example:22")
+})?;
 ```
 
-`Knocker::from_knock_file()` is a convenience for the keygen file format;
-`Enroller` does the one-time-token bootstrap. The library is cross-platform (no
-eBPF); only the gate is Linux-only.
+`with_open` handles the ordering, the brief grace before the SYN, and re-knocking
+on a transient failure. Use the lower-level `knocker.knock(target, ports)` if you
+want to drive the connection yourself (e.g. async). `Knocker::from_knock_file()`
+loads the keygen file format; `Enroller` does the one-time-token bootstrap. The
+library is cross-platform (no eBPF); only the gate is Linux-only.
 
 ## Config reference (`gated.toml`)
 
