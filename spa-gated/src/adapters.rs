@@ -89,17 +89,19 @@ impl TrustStore for ConfigTrust {
     }
 }
 
-/// Gate writer that programs the kernel allow-list (the `ALLOW` BPF map).
+/// Gate writer that programs the kernel allow-list (the `ALLOW` BPF map) and,
+/// when enabled, mirrors the grant into the nftables fail-closed floor.
 pub struct BpfGateWriter {
     pub allow: BpfHashMap<MapData, u32, Grant>,
+    pub nft_floor: bool,
 }
 
 impl GateWriter for BpfGateWriter {
     fn open(&mut self, source: IpAddr, ports: &[u16], ttl_nanos: u64) {
         // The XDP key is the IPv4 source as it sits in the packet, read as a
         // native u32 — match that exactly. IPv6 is not yet cloaked.
-        let key = match source {
-            IpAddr::V4(v4) => u32::from_ne_bytes(v4.octets()),
+        let v4 = match source {
+            IpAddr::V4(v4) => v4,
             IpAddr::V6(_) => return,
         };
         let mut grant = Grant {
@@ -114,7 +116,10 @@ impl GateWriter for BpfGateWriter {
         }
         // A failed map write just means this knock doesn't open the port; the
         // client can retry. Never panic in the hot path.
-        let _ = self.allow.insert(key, grant, 0);
+        let _ = self.allow.insert(u32::from_ne_bytes(v4.octets()), grant, 0);
+        if self.nft_floor {
+            crate::nft::allow(v4, ttl_nanos.div_ceil(1_000_000_000));
+        }
     }
 }
 

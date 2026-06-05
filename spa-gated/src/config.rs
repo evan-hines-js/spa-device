@@ -19,6 +19,8 @@ struct Raw {
     pinhole_ms: u64,
     #[serde(default = "default_skew")]
     skew_seconds: u64,
+    #[serde(default = "default_true")]
+    nftables_floor: bool,
     protected_ports: Vec<u16>,
     #[serde(default)]
     client: Vec<RawClient>,
@@ -37,6 +39,9 @@ fn default_pinhole() -> u64 {
 fn default_skew() -> u64 {
     2
 }
+fn default_true() -> bool {
+    true
+}
 
 /// An authorized client: its key thumbprint, public key, and permitted ports.
 pub struct ClientEntry {
@@ -54,6 +59,7 @@ pub struct Config {
     pub bpf_object: String,
     pub pinhole_ms: u64,
     pub skew_seconds: u64,
+    pub nftables_floor: bool,
     pub protected_ports: Vec<u16>,
     pub clients: Vec<ClientEntry>,
 }
@@ -84,6 +90,7 @@ impl Config {
             bpf_object: raw.bpf_object,
             pinhole_ms: raw.pinhole_ms,
             skew_seconds: raw.skew_seconds,
+            nftables_floor: raw.nftables_floor,
             protected_ports: raw.protected_ports,
             clients,
         })

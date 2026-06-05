@@ -3,6 +3,7 @@
 
 mod adapters;
 mod config;
+mod nft;
 
 use std::error::Error;
 use std::net::UdpSocket;
@@ -47,6 +48,13 @@ fn main() -> Result<(), Box<dyn Error>> {
         eprintln!("[spa] cloaking tcp ports {:?}", cfg.protected_ports);
     }
 
+    // Install the fail-closed nftables floor so the port stays closed even if
+    // this daemon dies and XDP detaches.
+    if cfg.nftables_floor {
+        nft::install_floor(&cfg.protected_ports)?;
+        eprintln!("[spa] nftables fail-closed floor installed");
+    }
+
     // Take the allow-list map for the gate writer to own.
     let allow: BpfHashMap<_, u32, Grant> =
         BpfHashMap::try_from(ebpf.take_map("ALLOW").ok_or("missing map ALLOW")?)?;
@@ -69,7 +77,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         gate_key,
         trust,
         replay,
-        BpfGateWriter { allow },
+        BpfGateWriter {
+            allow,
+            nft_floor: cfg.nftables_floor,
+        },
     );
 
     // Knock loop. `ebpf` is held for the process lifetime to keep the program
