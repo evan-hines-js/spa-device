@@ -60,3 +60,18 @@ cd spa-ebpf && cargo build --release
 (`legacy map definitions ... not supported by libbpf v1.0+`) — that is expected,
 not a fault. Validate by **loading it with aya** (the loader/daemon), never with
 bpftool.
+
+## Release artifacts
+
+The gate can't be built on macOS, so a deploy fetches **prebuilt** artifacts
+rather than building on the target. `scripts/build-gate-release.sh` (run on a
+Linux build host, or in CI) produces them under `dist/`:
+
+- `spa-gate.o` — the XDP BPF object. eBPF bytecode is **CPU-arch independent**, so
+  one object serves every little-endian arch.
+- `spa-gated-<arch>-unknown-linux-gnu` — the daemon binary, one per arch.
+- `SHA256SUMS` — checksums.
+
+`.github/workflows/release.yml` runs that script on a `v*` tag and uploads the
+artifacts as GitHub release assets; the control plane's deploy role fetches them
+from there (no target-side build).

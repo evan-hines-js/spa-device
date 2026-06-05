@@ -1,0 +1,52 @@
+name: release
+
+# Build the prebuilt gate artifacts on Linux (the gate can't build on macOS) and
+# attach them to the GitHub release for the tag. The control plane's deploy role
+# fetches them from here. See BUILD.md "Release artifacts".
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install nightly + rust-src
+        run: |
+          rustup toolchain install nightly --profile minimal --component rust-src
+          rustup default nightly
+
+      - name: Install bpf-linker
+        run: cargo install bpf-linker
+
+      - name: Repair LLVM shared-lib shim (BUILD.md workaround)
+        run: |
+          lib="$(rustc --print sysroot)/lib"
+          cd "$lib"
+          for f in libLLVM-*-rust-*-nightly.so; do
+            [ -e "$f" ] || continue
+            # Some nightlies ship this name as a GNU ld linker script, which
+            # dlopen can't load — point it at the real shared object.
+            if file "$f" | grep -qi 'text'; then
+              real="$(ls libLLVM.so.*-rust-*-nightly 2>/dev/null | head -1)"
+              [ -n "$real" ] && ln -sf "$real" "$f" && echo "linked $f -> $real"
+            fi
+          done
+
+      - name: Build gate artifacts
+        run: bash scripts/build-gate-release.sh
+
+      - name: Publish to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          assets=(dist/spa-gate.o dist/spa-gated-* dist/SHA256SUMS)
+          gh release create "$GITHUB_REF_NAME" "${assets[@]}" \
+            --title "$GITHUB_REF_NAME" \
+            --notes "Prebuilt gate artifacts: spa-gated daemon + spa-gate.o BPF object (spa-gate.o is CPU-arch independent)." \
+          || gh release upload "$GITHUB_REF_NAME" "${assets[@]}" --clobber
