@@ -13,13 +13,13 @@ use std::error::Error;
 use std::net::UdpSocket;
 use std::time::Duration;
 
-use aya::maps::{HashMap as BpfHashMap, MapData};
+use aya::maps::{Array as BpfArray, HashMap as BpfHashMap, MapData};
 use aya::programs::{Xdp, XdpFlags};
 use aya::Ebpf;
 
 use spa_core::{Config as GateConfig, Decision, Gatekeeper};
 use spa_crypto::GateKeypair;
-use spa_ebpf_common::Grant;
+use spa_ebpf_common::{GateConfig as KernelConfig, Grant};
 
 use adapters::{BpfGateWriter, MemReplay, SharedTrust, SystemClock};
 use config::{ClientEntry, Config};
@@ -54,6 +54,20 @@ fn main() -> Result<(), Box<dyn Error>> {
         prog.load()?;
         prog.attach(&cfg.interface, XdpFlags::SKB_MODE)?;
         eprintln!("[spa] attached spa_gate to {}", cfg.interface);
+    }
+
+    // Tell the data plane the knock port so it can size-filter + rate-limit it.
+    {
+        let mut config: BpfArray<_, KernelConfig> =
+            BpfArray::try_from(ebpf.map_mut("CONFIG").ok_or("missing map CONFIG")?)?;
+        config.set(
+            0,
+            KernelConfig {
+                knock_port: cfg.knock_port,
+                _pad: [0; 6],
+            },
+            0,
+        )?;
     }
 
     // Program the set of cloaked ports.

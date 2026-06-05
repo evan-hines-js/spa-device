@@ -76,7 +76,9 @@ cat "$WORK/legit.gate.toml" >> "$WORK/gated.toml"
 
 cat > "$WORK/garbage.py" <<'PY'
 import socket, sys
-socket.socket(socket.AF_INET, socket.SOCK_DGRAM).sendto(b"\x00" * 60, (sys.argv[1], int(sys.argv[2])))
+# 200 bytes: passes the XDP size pre-filter so it reaches the daemon and is
+# rejected there as Undecryptable (undersized junk is dropped in-kernel instead).
+socket.socket(socket.AF_INET, socket.SOCK_DGRAM).sendto(b"\x00" * 200, (sys.argv[1], int(sys.argv[2])))
 PY
 
 echo "== start daemon =="
