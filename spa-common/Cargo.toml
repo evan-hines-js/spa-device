@@ -1,0 +1,10 @@
+[package]
+name = "spa-common"
+version = "0.1.0"
+edition = "2024"
+
+# Wire-format contract shared by the daemon and client. No dependencies by
+# design: this is the most security-critical parser in the system and must stay
+# trivially auditable. Crypto lives in the crates that use this one (aws-lc-rs);
+# this crate only defines byte layout and bounds-checked encode/decode.
+[dependencies]

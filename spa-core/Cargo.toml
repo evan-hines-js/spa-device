@@ -1,0 +1,11 @@
+[package]
+name = "spa-core"
+version = "0.1.0"
+edition = "2024"
+
+# The pure decision core. Depends only on the wire format; no crypto, no I/O,
+# no async. All side effects (crypto, clock, trust lookups, replay state, gate
+# programming) are ports (traits) injected by the caller, so the entire
+# admit() decision is exercisable with fakes for ~100% coverage. See DESIGN.md.
+[dependencies]
+spa-common = { path = "../spa-common" }

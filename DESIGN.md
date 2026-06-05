@@ -229,39 +229,89 @@ component; integration is REST + PKI.
 
 ---
 
-## 7. Configuration & operational safety
+## 7. Configuration — dynamic, signed, transport-agnostic
 
-Single declarative config (the gate's source of truth):
+Config is the gate's security policy (the authorized keys and the cloaked ports),
+so it is treated as security-critical data, not a static file. Two tiers:
 
+**Bootstrap (static, local, minimal, provisioned out-of-band).** The only thing
+fixed at install:
 ```
 gate_id            = "<16-byte gate identity>"
-identity_key       = "<path to gate keypair>"
-cipher_suite       = "fips" | "modern"
+identity_key       = "<path to gate keypair>"      # this gate's ECDH/identity key
+config_anchor      = "<pinned control-plane public key>"  # trust anchor for bundles
+config_path        = "/etc/spa/bundle.spa"         # where signed bundles are read
 knock_port         = 62201
-pinhole_ms         = 400
-skew_seconds       = 2
-
-[[protected]]                 # repeatable — cloak any number of services
-proto = "tcp"; ports = [22, 8443]
-
-[trust]
-backend = "static" | "pki" | "external"
-# backend-specific settings...
-
-[[static_rule]]               # break-glass, evaluated before SPA logic
-action = "allow"; cidr = "10.0.0.0/24"; ports = [8443]   # e.g. trusted mgmt net
 ```
 
-**Break-glass / bootstrap.** Cloaking infrastructure can create dependency loops
-(a node that must knock to reach the very service it needs in order to know how to
-knock). `static_rule` allow-entries cover known-good management networks or peer
-nodes so a hard power-cycle never bricks a cluster. These are the explicit,
-audited exception to default-drop — narrow CIDRs, specific ports.
+**Dynamic (a signed bundle, hot-reloaded).** Everything else lives in a config
+bundle the control plane produces:
+```
+generation = 42                         # monotonic; older is rejected (anti-rollback)
+cipher_suite = "fips" | "modern"
+pinhole_ms = 400
+skew_seconds = 2
 
-**Fail-safe posture.** If the daemon dies, the XDP program keeps enforcing the
-last-known maps (default: continue cloaking — fail *closed* on reachability,
-fail *open* on already-established flows). Configurable for environments that
-require fail-open on daemon loss.
+[[protected]]   proto = "tcp"; ports = [22, 8443]        # cloak any number of services
+[[client]]      thumbprint = "..."; ports = [8443]       # authorized client keys + policy
+[[static_rule]] action = "allow"; cidr = "10.0.0.0/24"; ports = [8443]   # break-glass
+```
+
+### Consumption is decoupled from transport
+
+The agent consumes config through a **`ConfigSource` port** that yields a
+hot-swappable snapshot. *How* the bundle arrives is a separate, pluggable adapter:
+
+- **`FileWatch` (the minimum):** watch a local signed bundle, atomically reload on
+  change. Anything may write that file — control plane, a sync sidecar, GitOps.
+- **`ControlPlaneApi` (drop-in, later):** poll/stream a controller directly. Same
+  port, no change to the core.
+
+**The agent trusts the signature, not the channel.** Each bundle is signed by the
+control plane; the agent verifies it against the pinned `config_anchor` before
+applying. A tampered or spoofed transport cannot inject keys or open ports, so the
+delivery mechanism can be fully untrusted. This is the shift-left principle (§ on
+trust lifecycle) applied to config itself.
+
+### Reload safety
+
+- **Atomic + validated.** A bundle is fully verified (signature, then schema) and
+  applied as a single atomic snapshot swap. Invalid → rejected, **last-good
+  retained**, logged. Never partially applied.
+- **Anti-rollback.** A bundle whose `generation` is ≤ the applied one is refused,
+  so a replayed stale bundle cannot re-authorize a revoked key.
+- **Fail closed on reachability.** Missing/invalid/absent config keeps ports
+  **cloaked** — it never opens them. Established flows are handled separately (§5).
+
+### Break-glass / bootstrap
+
+Cloaking infrastructure can create dependency loops (a node that must knock to
+reach the very service it needs in order to know how to knock). `static_rule`
+allow-entries cover known-good management networks or peer nodes so a hard
+power-cycle never bricks a cluster — the explicit, audited exception to
+default-drop, with narrow CIDRs and specific ports.
+
+### Failure posture — fail closed
+
+The secure default is **fail closed**: any failure of the SPA layer must leave
+protected ports *less* reachable, never more. There is no "fail open" mode for
+access.
+
+- **New reachability fails closed.** If the verification daemon dies, no new
+  authorizations are created, the allow-list only ages out by TTL, and new
+  connections to protected ports are dropped. Access control degrades to *deny*.
+- **The secure default survives loss of the cloaking layer itself.** Protected
+  ports carry a base `nftables`/`iptables` **default-drop** rule, independent of
+  the eBPF allow-list (which only ever *adds* permits on top). If the XDP program
+  is unloaded or crashes, the port stays closed — it does not revert to exposed.
+- **Already-authorized established flows are preserved across a daemon restart**
+  (they bypass the per-source check via conntrack). This is an *availability*
+  decision, not a loosening of access control: those flows already passed both
+  the gate and the service's own authentication, and the restart grants no new
+  access. A strict mode can additionally reset established flows on daemon loss.
+
+The only operator knob is how aggressively to tear down already-vetted sessions on
+failure — never whether new access is granted.
 
 ---
 

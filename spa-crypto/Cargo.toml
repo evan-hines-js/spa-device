@@ -1,0 +1,18 @@
+[package]
+name = "spa-crypto"
+version = "0.1.0"
+edition = "2024"
+
+# The signcryption envelope: ephemeral ECDH -> HKDF -> AEAD, plus client
+# signing/verification. All crypto comes from aws-lc-rs (the single, FIPS-capable
+# crypto stack). This crate implements the `spa_core::Crypto` port and the client
+# `seal`; it knows nothing about trust/policy. See DESIGN.md §4.
+[dependencies]
+spa-common = { path = "../spa-common" }
+spa-core = { path = "../spa-core" }
+aws-lc-rs = "1"
+
+[features]
+# Build the FIPS 140-3 validated AWS-LC module. Exercised on the Linux build
+# host; the default (non-FIPS) build is used for fast iteration on macOS.
+fips = ["aws-lc-rs/fips"]
