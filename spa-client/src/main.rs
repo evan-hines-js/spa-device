@@ -104,7 +104,10 @@ fn gen_client(prefix: &str, suite_name: &str) -> Result<(), Box<dyn Error>> {
 /// pubkey, gate_id, suite, address, knock_port) plus this client's `gen-client`
 /// key. This is the production path — no throwaway gate, no manual target.
 fn knock_descriptor(descriptor: &str, client_key: &str, ports: &str) -> Result<(), Box<dyn Error>> {
-    let d: serde_json::Value = serde_json::from_str(&fs::read_to_string(descriptor)?)?;
+    let text = fs::read_to_string(descriptor)
+        .map_err(|e| format!("reading descriptor {descriptor}: {e}"))?;
+    let d: serde_json::Value =
+        serde_json::from_str(&text).map_err(|e| format!("parsing descriptor {descriptor}: {e}"))?;
     let suite = parse_suite(field(&d, "suite")?)?;
     let gate_pubkey = hex::decode(field(&d, "gate_pubkey_hex")?)?;
     let gate_id = gate_id_arr(field(&d, "gate_id_hex")?)?;
@@ -113,7 +116,9 @@ fn knock_descriptor(descriptor: &str, client_key: &str, ports: &str) -> Result<(
         .get("knock_port")
         .and_then(serde_json::Value::as_u64)
         .ok_or("descriptor: missing/invalid knock_port")?;
-    let pkcs8 = hex::decode(fs::read_to_string(client_key)?.trim())?;
+    let key_hex = fs::read_to_string(client_key)
+        .map_err(|e| format!("reading client key {client_key} (from `gen-client`): {e}"))?;
+    let pkcs8 = hex::decode(key_hex.trim()).map_err(|e| format!("client key {client_key}: {e}"))?;
     let ports: Vec<u16> = ports
         .split(',')
         .map(|p| p.trim().parse::<u16>())
