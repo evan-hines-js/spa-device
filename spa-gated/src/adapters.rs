@@ -3,12 +3,15 @@
 
 use std::collections::HashMap as StdHashMap;
 use std::net::IpAddr;
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use aya::maps::{HashMap as BpfHashMap, MapData};
 use spa_common::{Suite, NONCE_LEN, THUMBPRINT_LEN};
 use spa_core::{ClientPolicy, Clock, GateWriter, ReplayGuard, TrustStore};
 use spa_ebpf_common::{Grant, MAX_GRANT_PORTS};
+
+use crate::config::ClientEntry;
 
 /// Wall clock for the knock-timestamp skew check (unix nanoseconds).
 pub struct SystemClock;
@@ -52,34 +55,39 @@ impl ReplayGuard for MemReplay {
     }
 }
 
-/// Trust store backed by the daemon config: thumbprint → (public key, ports).
-/// All clients share the gate's `suite`.
-pub struct ConfigTrust {
-    clients: StdHashMap<[u8; THUMBPRINT_LEN], (Vec<u8>, Vec<u16>)>,
+/// Hot-swappable trust store: thumbprint → (public key, ports). Shared (cheap
+/// `Clone` of an `Arc`) between the knock loop and the bundle watcher; the
+/// watcher calls [`set`](Self::set) on reload while the loop keeps reading. All
+/// clients share the gate's `suite`.
+#[derive(Clone)]
+pub struct SharedTrust {
+    inner: Arc<RwLock<StdHashMap<[u8; THUMBPRINT_LEN], (Vec<u8>, Vec<u16>)>>>,
     suite: Suite,
 }
 
-impl ConfigTrust {
+impl SharedTrust {
     pub fn new(suite: Suite) -> Self {
-        ConfigTrust {
-            clients: StdHashMap::new(),
+        SharedTrust {
+            inner: Arc::new(RwLock::new(StdHashMap::new())),
             suite,
         }
     }
 
-    pub fn insert(
-        &mut self,
-        thumbprint: [u8; THUMBPRINT_LEN],
-        public_key: Vec<u8>,
-        ports: Vec<u16>,
-    ) {
-        self.clients.insert(thumbprint, (public_key, ports));
+    /// Atomically replace the entire client set (used on bundle reload).
+    pub fn set(&self, clients: &[ClientEntry]) {
+        let mut map = self.inner.write().expect("trust lock");
+        map.clear();
+        for c in clients {
+            map.insert(c.thumbprint, (c.public_key.clone(), c.ports.clone()));
+        }
     }
 }
 
-impl TrustStore for ConfigTrust {
+impl TrustStore for SharedTrust {
     fn lookup(&self, thumbprint: &[u8; THUMBPRINT_LEN]) -> Option<ClientPolicy> {
-        self.clients
+        self.inner
+            .read()
+            .expect("trust lock")
             .get(thumbprint)
             .map(|(pk, ports)| ClientPolicy {
                 public_key: pk.clone(),

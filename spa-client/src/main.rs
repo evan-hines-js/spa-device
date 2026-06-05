@@ -23,11 +23,48 @@ fn main() -> Result<(), Box<dyn Error>> {
             args.get(2).ok_or("usage: knock <addr:port> <file>")?,
             args.get(3).ok_or("usage: knock <addr:port> <file>")?,
         ),
+        Some("gen-anchor") => gen_anchor(args.get(2).ok_or("usage: gen-anchor <prefix>")?),
+        Some("sign-bundle") => sign_bundle(
+            args.get(2)
+                .ok_or("usage: sign-bundle <anchor.key> <payload.toml> <out.bundle>")?,
+            args.get(3)
+                .ok_or("usage: sign-bundle <anchor.key> <payload.toml> <out.bundle>")?,
+            args.get(4)
+                .ok_or("usage: sign-bundle <anchor.key> <payload.toml> <out.bundle>")?,
+        ),
         _ => {
-            eprintln!("usage: spa-client [keygen <prefix> | knock <addr:port> <file>]");
+            eprintln!(
+                "usage: spa-client [keygen <prefix> | knock <addr:port> <file> | \
+                 gen-anchor <prefix> | sign-bundle <anchor.key> <payload.toml> <out.bundle>]"
+            );
             Ok(())
         }
     }
+}
+
+/// Generate a control-plane anchor keypair: writes the private key and prints
+/// the public key to pin in the daemon's `config_anchor_hex`.
+fn gen_anchor(prefix: &str) -> Result<(), Box<dyn Error>> {
+    let anchor = ClientKey::generate(Suite::Modern)?;
+    fs::write(
+        format!("{prefix}.anchor.key"),
+        hex::encode(anchor.to_pkcs8()?),
+    )?;
+    println!("anchor_pubkey_hex={}", hex::encode(anchor.public_key()));
+    println!("wrote {prefix}.anchor.key");
+    Ok(())
+}
+
+/// Sign a policy bundle: out = raw 64-byte signature ‖ payload bytes.
+fn sign_bundle(keyfile: &str, payload: &str, out: &str) -> Result<(), Box<dyn Error>> {
+    let pkcs8 = hex::decode(fs::read_to_string(keyfile)?.trim())?;
+    let anchor = ClientKey::from_pkcs8(Suite::Modern, &pkcs8)?;
+    let body = fs::read(payload)?;
+    let mut bundle = anchor.sign_detached(&body)?;
+    bundle.extend_from_slice(&body);
+    fs::write(out, &bundle)?;
+    println!("signed {payload} -> {out} ({} bytes)", bundle.len());
+    Ok(())
 }
 
 fn random<const N: usize>() -> Result<[u8; N], Box<dyn Error>> {

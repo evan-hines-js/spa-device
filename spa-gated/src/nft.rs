@@ -50,6 +50,15 @@ pub fn allow(ip: Ipv4Addr, timeout_secs: u64) {
         .status();
 }
 
+/// Replace the protected-ports set (used on bundle reload).
+pub fn set_ports(protected: &[u16]) -> std::io::Result<()> {
+    let mut script = String::from("flush set inet spa ports\n");
+    for p in protected {
+        script.push_str(&format!("add element inet spa ports {{ {p} }}\n"));
+    }
+    run_stdin(&script)
+}
+
 fn run_stdin(script: &str) -> std::io::Result<()> {
     let mut child = Command::new("nft")
         .arg("-f")

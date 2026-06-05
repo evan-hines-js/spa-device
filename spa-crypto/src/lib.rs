@@ -359,6 +359,12 @@ impl ClientKey {
         &self.thumbprint
     }
 
+    /// Sign arbitrary bytes (e.g. a config bundle) with this key; 64-byte raw
+    /// signature. Verify with [`verify_signature`] under the matching suite.
+    pub fn sign_detached(&self, message: &[u8]) -> Result<Vec<u8>, CryptoError> {
+        Ok(self.sign(message)?.to_vec())
+    }
+
     fn sign(&self, message: &[u8]) -> Result<[u8; SIG_LEN], CryptoError> {
         let sig = match &self.signer {
             Signer::Ecdsa(kp) => kp

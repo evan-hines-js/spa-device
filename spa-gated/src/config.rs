@@ -1,5 +1,9 @@
-//! Daemon configuration (local TOML). This is the unsigned, static form; the
-//! signed/hot-reloaded `ConfigSource` bundle of DESIGN.md §7 layers on top later.
+//! Daemon bootstrap configuration (local TOML).
+//!
+//! The static crypto/interface bits live here. The dynamic policy (authorized
+//! clients + protected ports) can either be inline here (static mode) or come
+//! from a signed [`crate::bundle`] when `config_anchor_hex` + `bundle_path` are
+//! set — that is the hot-reloaded, anti-rollback path of DESIGN.md §7.
 
 use std::error::Error;
 use std::fs;
@@ -21,16 +25,23 @@ struct Raw {
     skew_seconds: u64,
     #[serde(default = "default_true")]
     nftables_floor: bool,
+    // When both are set, dynamic policy comes from the signed bundle instead of
+    // the inline `protected_ports` / `client` fields.
+    #[serde(default)]
+    config_anchor_hex: Option<String>,
+    #[serde(default)]
+    bundle_path: Option<String>,
+    #[serde(default)]
     protected_ports: Vec<u16>,
     #[serde(default)]
     client: Vec<RawClient>,
 }
 
 #[derive(Deserialize)]
-struct RawClient {
-    thumbprint_hex: String,
-    public_key_hex: String,
-    ports: Vec<u16>,
+pub(crate) struct RawClient {
+    pub thumbprint_hex: String,
+    pub public_key_hex: String,
+    pub ports: Vec<u16>,
 }
 
 fn default_pinhole() -> u64 {
@@ -44,6 +55,7 @@ fn default_true() -> bool {
 }
 
 /// An authorized client: its key thumbprint, public key, and permitted ports.
+#[derive(Clone)]
 pub struct ClientEntry {
     pub thumbprint: [u8; THUMBPRINT_LEN],
     pub public_key: Vec<u8>,
@@ -60,6 +72,9 @@ pub struct Config {
     pub pinhole_ms: u64,
     pub skew_seconds: u64,
     pub nftables_floor: bool,
+    /// Pinned control-plane signing public key (Ed25519) for verifying bundles.
+    pub config_anchor: Option<Vec<u8>>,
+    pub bundle_path: Option<String>,
     pub protected_ports: Vec<u16>,
     pub clients: Vec<ClientEntry>,
 }
@@ -72,15 +87,10 @@ impl Config {
             "modern" => Suite::Modern,
             other => return Err(format!("unknown suite {other:?}").into()),
         };
-        let mut clients = Vec::new();
-        for c in raw.client {
-            clients.push(ClientEntry {
-                thumbprint: hex_arr::<THUMBPRINT_LEN>(&c.thumbprint_hex, "thumbprint_hex")?,
-                public_key: hex::decode(&c.public_key_hex)
-                    .map_err(|e| format!("public_key_hex: {e}"))?,
-                ports: c.ports,
-            });
-        }
+        let config_anchor = match raw.config_anchor_hex {
+            Some(h) => Some(hex::decode(&h).map_err(|e| format!("config_anchor_hex: {e}"))?),
+            None => None,
+        };
         Ok(Config {
             interface: raw.interface,
             knock_port: raw.knock_port,
@@ -91,10 +101,25 @@ impl Config {
             pinhole_ms: raw.pinhole_ms,
             skew_seconds: raw.skew_seconds,
             nftables_floor: raw.nftables_floor,
+            config_anchor,
+            bundle_path: raw.bundle_path,
             protected_ports: raw.protected_ports,
-            clients,
+            clients: parse_clients(raw.client)?,
         })
     }
+}
+
+pub(crate) fn parse_clients(raw: Vec<RawClient>) -> Result<Vec<ClientEntry>, Box<dyn Error>> {
+    let mut out = Vec::with_capacity(raw.len());
+    for c in raw {
+        out.push(ClientEntry {
+            thumbprint: hex_arr::<THUMBPRINT_LEN>(&c.thumbprint_hex, "thumbprint_hex")?,
+            public_key: hex::decode(&c.public_key_hex)
+                .map_err(|e| format!("public_key_hex: {e}"))?,
+            ports: c.ports,
+        });
+    }
+    Ok(out)
 }
 
 fn hex_len(s: &str, n: usize, what: &str) -> Result<Vec<u8>, Box<dyn Error>> {
