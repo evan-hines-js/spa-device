@@ -1,0 +1,13 @@
+[package]
+name = "spa-ebpf-common"
+version = "0.1.0"
+edition = "2024"
+
+# POD map types shared verbatim between the XDP program (kernel, no_std) and the
+# userland loader. Kept tiny and repr(C) so both sides agree on the byte layout.
+# The `user` feature adds aya::Pod impls for the loader side only.
+[dependencies]
+aya = { version = "0.13", optional = true }
+
+[features]
+user = ["dep:aya"]

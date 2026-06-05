@@ -1,3 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["spa-common", "spa-core", "spa-crypto"]
+members = ["spa-common", "spa-core", "spa-crypto", "spa-ebpf-common"]
+# spa-ebpf is built only for the BPF target (bpfel-unknown-none) on the Linux
+# build host; excluded so the macOS userland build/test stays green.
+exclude = ["spa-ebpf"]

@@ -181,6 +181,20 @@ first-class for air-gapped or appliance scenarios with no key directory — same
 packet structure, the signature slot carries an HMAC and the ECDH-to-gate step
 uses a shared key. Operators choose per deployment; the data path is identical.
 
+**Canonical use of PSK mode: the single-use enrollment bootstrap.** An endpoint
+that has not enrolled yet holds no registered key, so it cannot make a normal
+asymmetric knock — the bootstrap chicken-and-egg. The clean resolution is to
+cloak the control plane's enrollment endpoint like any other port and treat the
+endpoint's **one-time enrollment token as a single-use PSK**: it authenticates
+exactly one knock, which opens the enrollment port long enough for the endpoint
+to register its freshly generated long-term key (with proof of possession), then
+the token is burned and the port re-cloaks. From then on the endpoint uses the
+asymmetric mode with its own key. This keeps *even bootstrap* dark — there is no
+permanently-open enrollment surface — and is driven by an `external` trust
+backend (§6) that validates outstanding tokens against the control plane and
+consumes them atomically on use. See `../argus/VISION.md` for the control-plane
+side of this flow.
+
 ---
 
 ## 5. Authorization lifetime — the micro-pinhole
