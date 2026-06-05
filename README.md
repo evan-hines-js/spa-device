@@ -119,6 +119,24 @@ The daemon emits a JSON audit line per decision:
 {"event":"knock","ts_ms":...,"source":"...","outcome":"open","ports":[22]}
 ```
 
+## Embedding the client (library)
+
+`spa-client` is a library as well as a CLI — call it from your application to
+knock before you dial, instead of shelling out:
+
+```rust
+use spa_client::Knocker;
+
+// Provisioned out of band (enrollment/config), or loaded from a keygen file:
+let knocker = Knocker::new(suite, gate_pubkey, gate_id, &client_pkcs8)?;
+knocker.knock("gate.example:62201", &[22])?;   // port 22 is now reachable from us
+// ...now open your connection as usual...
+```
+
+`Knocker::from_knock_file()` is a convenience for the keygen file format;
+`Enroller` does the one-time-token bootstrap. The library is cross-platform (no
+eBPF); only the gate is Linux-only.
+
 ## Config reference (`gated.toml`)
 
 | Key | Meaning |
