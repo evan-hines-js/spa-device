@@ -8,10 +8,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use aya::maps::{HashMap as BpfHashMap, MapData};
 use spa_common::{Suite, NONCE_LEN, THUMBPRINT_LEN};
-use spa_core::{ClientPolicy, Clock, GateWriter, ReplayGuard, TrustStore};
+use spa_core::{Auth, ClientPolicy, Clock, GateWriter, ReplayGuard, TrustStore};
 use spa_ebpf_common::{Grant, MAX_GRANT_PORTS};
 
-use crate::config::ClientEntry;
+use crate::config::{ClientEntry, TokenEntry};
 
 /// Wall clock for the knock-timestamp skew check (unix nanoseconds).
 pub struct SystemClock;
@@ -59,41 +59,68 @@ impl ReplayGuard for MemReplay {
 /// `Clone` of an `Arc`) between the knock loop and the bundle watcher; the
 /// watcher calls [`set`](Self::set) on reload while the loop keeps reading. All
 /// clients share the gate's `suite`.
+type Entry = (Vec<u8>, Vec<u16>); // (key material, ports)
+
 #[derive(Clone)]
 pub struct SharedTrust {
-    inner: Arc<RwLock<StdHashMap<[u8; THUMBPRINT_LEN], (Vec<u8>, Vec<u16>)>>>,
+    clients: Arc<RwLock<StdHashMap<[u8; THUMBPRINT_LEN], Entry>>>,
+    tokens: Arc<RwLock<StdHashMap<[u8; THUMBPRINT_LEN], Entry>>>,
     suite: Suite,
 }
 
 impl SharedTrust {
     pub fn new(suite: Suite) -> Self {
         SharedTrust {
-            inner: Arc::new(RwLock::new(StdHashMap::new())),
+            clients: Arc::new(RwLock::new(StdHashMap::new())),
+            tokens: Arc::new(RwLock::new(StdHashMap::new())),
             suite,
         }
     }
 
     /// Atomically replace the entire client set (used on bundle reload).
     pub fn set(&self, clients: &[ClientEntry]) {
-        let mut map = self.inner.write().expect("trust lock");
+        let mut map = self.clients.write().expect("trust lock");
         map.clear();
         for c in clients {
             map.insert(c.thumbprint, (c.public_key.clone(), c.ports.clone()));
+        }
+    }
+
+    /// Replace the one-time PSK enrollment tokens.
+    pub fn set_tokens(&self, tokens: &[TokenEntry]) {
+        let mut map = self.tokens.write().expect("trust lock");
+        map.clear();
+        for t in tokens {
+            map.insert(t.token_id, (t.secret.clone(), t.ports.clone()));
         }
     }
 }
 
 impl TrustStore for SharedTrust {
     fn lookup(&self, thumbprint: &[u8; THUMBPRINT_LEN]) -> Option<ClientPolicy> {
-        self.inner
-            .read()
-            .expect("trust lock")
-            .get(thumbprint)
-            .map(|(pk, ports)| ClientPolicy {
+        if let Some((pk, ports)) = self.clients.read().expect("trust lock").get(thumbprint) {
+            return Some(ClientPolicy {
                 public_key: pk.clone(),
                 suite: self.suite,
                 allowed_ports: ports.clone(),
-            })
+                auth: Auth::Signature,
+                single_use: false,
+            });
+        }
+        if let Some((secret, ports)) = self.tokens.read().expect("trust lock").get(thumbprint) {
+            return Some(ClientPolicy {
+                public_key: secret.clone(),
+                suite: self.suite,
+                allowed_ports: ports.clone(),
+                auth: Auth::Psk,
+                single_use: true,
+            });
+        }
+        None
+    }
+
+    fn consume(&self, thumbprint: &[u8; THUMBPRINT_LEN]) {
+        self.tokens.write().expect("trust lock").remove(thumbprint);
     }
 }
 

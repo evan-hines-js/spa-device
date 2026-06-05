@@ -35,6 +35,8 @@ struct Raw {
     protected_ports: Vec<u16>,
     #[serde(default)]
     client: Vec<RawClient>,
+    #[serde(default)]
+    token: Vec<RawToken>,
 }
 
 #[derive(Deserialize)]
@@ -42,6 +44,13 @@ pub(crate) struct RawClient {
     pub thumbprint_hex: String,
     pub public_key_hex: String,
     pub ports: Vec<u16>,
+}
+
+#[derive(Deserialize)]
+struct RawToken {
+    token_id_hex: String,
+    secret_hex: String,
+    ports: Vec<u16>,
 }
 
 fn default_pinhole() -> u64 {
@@ -62,6 +71,14 @@ pub struct ClientEntry {
     pub ports: Vec<u16>,
 }
 
+/// A one-time PSK enrollment token: its id, shared secret, and permitted ports.
+#[derive(Clone)]
+pub struct TokenEntry {
+    pub token_id: [u8; THUMBPRINT_LEN],
+    pub secret: Vec<u8>,
+    pub ports: Vec<u16>,
+}
+
 pub struct Config {
     pub interface: String,
     pub knock_port: u16,
@@ -77,6 +94,7 @@ pub struct Config {
     pub bundle_path: Option<String>,
     pub protected_ports: Vec<u16>,
     pub clients: Vec<ClientEntry>,
+    pub tokens: Vec<TokenEntry>,
 }
 
 impl Config {
@@ -105,8 +123,21 @@ impl Config {
             bundle_path: raw.bundle_path,
             protected_ports: raw.protected_ports,
             clients: parse_clients(raw.client)?,
+            tokens: parse_tokens(raw.token)?,
         })
     }
+}
+
+fn parse_tokens(raw: Vec<RawToken>) -> Result<Vec<TokenEntry>, Box<dyn Error>> {
+    let mut out = Vec::with_capacity(raw.len());
+    for t in raw {
+        out.push(TokenEntry {
+            token_id: hex_arr::<THUMBPRINT_LEN>(&t.token_id_hex, "token_id_hex")?,
+            secret: hex::decode(&t.secret_hex).map_err(|e| format!("secret_hex: {e}"))?,
+            ports: t.ports,
+        });
+    }
+    Ok(out)
 }
 
 pub(crate) fn parse_clients(raw: Vec<RawClient>) -> Result<Vec<ClientEntry>, Box<dyn Error>> {

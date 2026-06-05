@@ -91,6 +91,13 @@ fn main() -> Result<(), Box<dyn Error>> {
     let gate_key = GateKeypair::from_raw_private(cfg.suite, &cfg.gate_private)?;
     let trust = SharedTrust::new(cfg.suite);
     trust.set(&clients);
+    trust.set_tokens(&cfg.tokens);
+    if !cfg.tokens.is_empty() {
+        eprintln!(
+            "[spa] loaded {} one-time enrollment token(s)",
+            cfg.tokens.len()
+        );
+    }
     let replay = MemReplay::new(Duration::from_secs(cfg.skew_seconds * 2 + 1));
     let gate_cfg = GateConfig {
         gate_id: cfg.gate_id,

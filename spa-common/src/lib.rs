@@ -15,8 +15,10 @@ pub const VERSION: u8 = 1;
 
 pub const NONCE_LEN: usize = 16;
 pub const GATE_ID_LEN: usize = 16;
-/// SHA-256 thumbprint of the client's proof-of-possession public key. Doubles
-/// as the OIDC `cnf.jkt` binding when an OIDC trust backend is in use.
+/// Length of a key thumbprint: the **raw SHA-256 of the public-key bytes**
+/// (Ed25519 = the 32-byte key; ECDSA P-256 = the 65-byte uncompressed point
+/// `0x04‖X‖Y`). NOT an RFC 7638 JWK thumbprint. This exact construction is the
+/// cross-implementation interop contract with the control plane.
 pub const THUMBPRINT_LEN: usize = 32;
 /// Raw (r‖s for ECDSA P-256, or Ed25519) signature over the signing region.
 pub const SIG_LEN: usize = 64;

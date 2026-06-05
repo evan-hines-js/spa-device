@@ -17,7 +17,7 @@
 
 use aws_lc_rs::rand::SystemRandom;
 use aws_lc_rs::signature::KeyPair;
-use aws_lc_rs::{aead, agreement, digest, hkdf, signature};
+use aws_lc_rs::{aead, agreement, digest, hkdf, hmac, signature};
 
 use spa_common::{Authorization, GATE_ID_LEN, NONCE_LEN, SIG_LEN, Suite, THUMBPRINT_LEN, VERSION};
 use spa_core::{Crypto, OpenError, Opened};
@@ -164,6 +164,12 @@ pub fn verify_signature(suite: Suite, public_key: &[u8], message: &[u8], sig: &[
         .is_ok()
 }
 
+/// Constant-time HMAC-SHA512 check for PSK-mode knocks (the `mac` is the 64-byte
+/// authenticator field).
+pub fn verify_mac(key: &[u8], message: &[u8], mac: &[u8]) -> bool {
+    hmac::verify(&hmac::Key::new(hmac::HMAC_SHA512, key), message, mac).is_ok()
+}
+
 // ---- gate side --------------------------------------------------------------
 
 /// The gate's static identity key for one suite. Implements the [`Crypto`] port.
@@ -264,6 +270,10 @@ impl Crypto for GateKeypair {
 
     fn verify(&self, suite: Suite, public_key: &[u8], message: &[u8], sig: &[u8]) -> bool {
         verify_signature(suite, public_key, message, sig)
+    }
+
+    fn verify_mac(&self, key: &[u8], message: &[u8], mac: &[u8]) -> bool {
+        verify_mac(key, message, mac)
     }
 }
 
@@ -378,54 +388,96 @@ impl ClientKey {
         Ok(out)
     }
 
-    /// Build, sign, and seal a knock for `gate_public`, returning the wire packet.
-    pub fn seal(
-        &self,
-        gate_public: &[u8],
-        gate_id: [u8; GATE_ID_LEN],
-        ports: &[u16],
-        nonce: [u8; NONCE_LEN],
-        timestamp_nanos: u64,
-    ) -> Result<Vec<u8>, CryptoError> {
-        let mut auth = Authorization {
-            nonce,
-            timestamp_nanos,
-            gate_id,
-            key_thumbprint: self.thumbprint,
-            ports: ports.to_vec(),
-            signature: [0u8; SIG_LEN],
-        };
+    /// Build, sign (asymmetric), and seal a knock for `gate_public`.
+    pub fn seal(&self, gate_public: &[u8], req: &KnockRequest) -> Result<Vec<u8>, CryptoError> {
+        let mut auth = req.authorization(self.thumbprint);
         let signing = auth.signing_bytes().map_err(|_| CryptoError::Encode)?;
         auth.signature = self.sign(&signing)?;
         let plaintext = auth.encode().map_err(|_| CryptoError::Encode)?;
-
-        let rng = SystemRandom::new();
-        let ephemeral = agreement::EphemeralPrivateKey::generate(agreement_alg(self.suite), &rng)
-            .map_err(|_| CryptoError::Crypto)?;
-        let eph_pub = ephemeral
-            .compute_public_key()
-            .map_err(|_| CryptoError::Crypto)?
-            .as_ref()
-            .to_vec();
-
-        let mut header = Vec::with_capacity(2 + eph_pub.len());
-        header.push(VERSION);
-        header.push(self.suite.to_byte());
-        header.extend_from_slice(&eph_pub);
-
-        let peer = agreement::UnparsedPublicKey::new(agreement_alg(self.suite), gate_public);
-        let (key, aead_nonce) = agreement::agree_ephemeral(ephemeral, peer, (), |secret| {
-            derive(self.suite, secret, &eph_pub)
-        })
-        .map_err(|_| CryptoError::Crypto)?;
-
-        let ciphertext = aead_seal(self.suite, &key, aead_nonce, &header, &plaintext)
-            .map_err(|_| CryptoError::Crypto)?;
-
-        let mut packet = header;
-        packet.extend_from_slice(&ciphertext);
-        Ok(packet)
+        seal_envelope(gate_public, self.suite, &plaintext)
     }
+}
+
+/// The per-knock inputs shared by the asymmetric and PSK seal paths.
+pub struct KnockRequest<'a> {
+    pub gate_id: [u8; GATE_ID_LEN],
+    pub ports: &'a [u16],
+    pub nonce: [u8; NONCE_LEN],
+    pub timestamp_nanos: u64,
+}
+
+impl KnockRequest<'_> {
+    fn authorization(&self, key_thumbprint: [u8; THUMBPRINT_LEN]) -> Authorization {
+        Authorization {
+            nonce: self.nonce,
+            timestamp_nanos: self.timestamp_nanos,
+            gate_id: self.gate_id,
+            key_thumbprint,
+            ports: self.ports.to_vec(),
+            signature: [0u8; SIG_LEN],
+        }
+    }
+}
+
+/// Build and seal a **PSK** (pre-shared-key) knock: same envelope, but the
+/// authenticator field carries `HMAC-SHA512(token, signing_bytes)` instead of an
+/// asymmetric signature, and `key_thumbprint` carries the `token_id` the gate
+/// resolves to the token secret. The canonical use is the single-use enrollment
+/// bootstrap (DESIGN.md §4.3). `suite` selects only the envelope cipher.
+pub fn seal_psk(
+    gate_public: &[u8],
+    suite: Suite,
+    token: &[u8],
+    token_id: [u8; THUMBPRINT_LEN],
+    req: &KnockRequest,
+) -> Result<Vec<u8>, CryptoError> {
+    let mut auth = req.authorization(token_id);
+    let signing = auth.signing_bytes().map_err(|_| CryptoError::Encode)?;
+    auth.signature = mac_sha512(token, &signing);
+    let plaintext = auth.encode().map_err(|_| CryptoError::Encode)?;
+    seal_envelope(gate_public, suite, &plaintext)
+}
+
+/// Ephemeral-ECDH → HKDF → AEAD seal of `plaintext` to the gate's public key.
+fn seal_envelope(
+    gate_public: &[u8],
+    suite: Suite,
+    plaintext: &[u8],
+) -> Result<Vec<u8>, CryptoError> {
+    let rng = SystemRandom::new();
+    let ephemeral = agreement::EphemeralPrivateKey::generate(agreement_alg(suite), &rng)
+        .map_err(|_| CryptoError::Crypto)?;
+    let eph_pub = ephemeral
+        .compute_public_key()
+        .map_err(|_| CryptoError::Crypto)?
+        .as_ref()
+        .to_vec();
+
+    let mut header = Vec::with_capacity(2 + eph_pub.len());
+    header.push(VERSION);
+    header.push(suite.to_byte());
+    header.extend_from_slice(&eph_pub);
+
+    let peer = agreement::UnparsedPublicKey::new(agreement_alg(suite), gate_public);
+    let (key, aead_nonce) = agreement::agree_ephemeral(ephemeral, peer, (), |secret| {
+        derive(suite, secret, &eph_pub)
+    })
+    .map_err(|_| CryptoError::Crypto)?;
+
+    let ciphertext =
+        aead_seal(suite, &key, aead_nonce, &header, plaintext).map_err(|_| CryptoError::Crypto)?;
+
+    let mut packet = header;
+    packet.extend_from_slice(&ciphertext);
+    Ok(packet)
+}
+
+/// HMAC-SHA512 of `message` under `key`, as a 64-byte authenticator.
+fn mac_sha512(key: &[u8], message: &[u8]) -> [u8; SIG_LEN] {
+    let tag = hmac::sign(&hmac::Key::new(hmac::HMAC_SHA512, key), message);
+    let mut out = [0u8; SIG_LEN];
+    out.copy_from_slice(tag.as_ref());
+    out
 }
 
 fn thumbprint_of(public_key: &[u8]) -> [u8; THUMBPRINT_LEN] {
@@ -442,12 +494,21 @@ mod tests {
     const GATE_ID: [u8; GATE_ID_LEN] = [0x42; GATE_ID_LEN];
     const NONCE: [u8; NONCE_LEN] = [0x11; NONCE_LEN];
 
+    fn req(ports: &[u16], timestamp_nanos: u64) -> KnockRequest<'_> {
+        KnockRequest {
+            gate_id: GATE_ID,
+            ports,
+            nonce: NONCE,
+            timestamp_nanos,
+        }
+    }
+
     fn round_trip(suite: Suite) {
         let gate = GateKeypair::generate(suite).unwrap();
         let client = ClientKey::generate(suite).unwrap();
 
         let packet = client
-            .seal(gate.public_key(), GATE_ID, &[22, 8443], NONCE, 1_234)
+            .seal(gate.public_key(), &req(&[22, 8443], 1_234))
             .unwrap();
 
         let opened = gate.open(&packet).unwrap();
@@ -483,6 +544,59 @@ mod tests {
         assert_eq!(client.thumbprint(), &thumbprint_of(client.public_key()));
     }
 
+    /// Cross-impl interop contract: the thumbprint is SHA-256 of these EXACT
+    /// public-key bytes — Ed25519 = 32-byte raw key, P-256 = 65-byte uncompressed
+    /// point (0x04‖X‖Y). Argus hashes the same bytes; if aws-lc-rs ever changed
+    /// the encoding (compressed point / DER SPKI), thumbprints would silently
+    /// stop matching. Pin it.
+    #[test]
+    fn public_key_encodings_are_pinned() {
+        let ed = ClientKey::generate(Suite::Modern).unwrap();
+        assert_eq!(
+            ed.public_key().len(),
+            32,
+            "Ed25519 raw public key is 32 bytes"
+        );
+
+        let ec = ClientKey::generate(Suite::Fips).unwrap();
+        assert_eq!(
+            ec.public_key().len(),
+            65,
+            "P-256 uncompressed point is 65 bytes"
+        );
+        assert_eq!(
+            ec.public_key()[0],
+            0x04,
+            "P-256 point is uncompressed (0x04 prefix)"
+        );
+
+        assert_eq!(ed.thumbprint(), &thumbprint_of(ed.public_key()));
+        assert_eq!(ec.thumbprint(), &thumbprint_of(ec.public_key()));
+    }
+
+    #[test]
+    fn psk_knock_round_trips() {
+        for suite in [Suite::Fips, Suite::Modern] {
+            let gate = GateKeypair::generate(suite).unwrap();
+            let token = b"one-time-enrollment-token-secret";
+            let token_id = [0x55u8; THUMBPRINT_LEN];
+            let packet =
+                seal_psk(gate.public_key(), suite, token, token_id, &req(&[22], 7)).unwrap();
+            let opened = gate.open(&packet).unwrap();
+            assert_eq!(opened.auth.key_thumbprint, token_id);
+            assert!(verify_mac(
+                token,
+                &opened.signing_bytes,
+                &opened.auth.signature
+            ));
+            assert!(!verify_mac(
+                b"wrong-token",
+                &opened.signing_bytes,
+                &opened.auth.signature
+            ));
+        }
+    }
+
     #[test]
     fn gate_raw_key_round_trips() {
         for suite in [Suite::Fips, Suite::Modern] {
@@ -491,9 +605,7 @@ mod tests {
             // Same key → same public key, and a knock sealed to it opens.
             assert_eq!(gate.public_key(), reloaded.public_key());
             let client = ClientKey::generate(suite).unwrap();
-            let packet = client
-                .seal(reloaded.public_key(), GATE_ID, &[22], NONCE, 1)
-                .unwrap();
+            let packet = client.seal(reloaded.public_key(), &req(&[22], 1)).unwrap();
             assert!(gate.open(&packet).is_ok());
         }
     }
@@ -513,9 +625,7 @@ mod tests {
     fn tampered_ciphertext_fails_open() {
         let gate = GateKeypair::generate(Suite::Fips).unwrap();
         let client = ClientKey::generate(Suite::Fips).unwrap();
-        let mut packet = client
-            .seal(gate.public_key(), GATE_ID, &[22], NONCE, 1)
-            .unwrap();
+        let mut packet = client.seal(gate.public_key(), &req(&[22], 1)).unwrap();
         let last = packet.len() - 1;
         packet[last] ^= 0x01;
         assert!(gate.open(&packet).is_err());
@@ -527,9 +637,7 @@ mod tests {
         // breaks the tag.
         let gate = GateKeypair::generate(Suite::Fips).unwrap();
         let client = ClientKey::generate(Suite::Fips).unwrap();
-        let mut packet = client
-            .seal(gate.public_key(), GATE_ID, &[22], NONCE, 1)
-            .unwrap();
+        let mut packet = client.seal(gate.public_key(), &req(&[22], 1)).unwrap();
         packet[10] ^= 0x01;
         assert!(gate.open(&packet).is_err());
     }
@@ -539,9 +647,7 @@ mod tests {
         let gate = GateKeypair::generate(Suite::Fips).unwrap();
         let other_gate = GateKeypair::generate(Suite::Fips).unwrap();
         let client = ClientKey::generate(Suite::Fips).unwrap();
-        let packet = client
-            .seal(gate.public_key(), GATE_ID, &[22], NONCE, 1)
-            .unwrap();
+        let packet = client.seal(gate.public_key(), &req(&[22], 1)).unwrap();
         assert!(other_gate.open(&packet).is_err());
     }
 
@@ -552,7 +658,7 @@ mod tests {
         let modern_gate = GateKeypair::generate(Suite::Modern).unwrap();
         let client = ClientKey::generate(Suite::Modern).unwrap();
         let packet = client
-            .seal(modern_gate.public_key(), GATE_ID, &[22], NONCE, 1)
+            .seal(modern_gate.public_key(), &req(&[22], 1))
             .unwrap();
         assert!(fips_gate.open(&packet).is_err());
     }
@@ -562,9 +668,7 @@ mod tests {
         let gate = GateKeypair::generate(Suite::Fips).unwrap();
         let client = ClientKey::generate(Suite::Fips).unwrap();
         let impostor = ClientKey::generate(Suite::Fips).unwrap();
-        let packet = client
-            .seal(gate.public_key(), GATE_ID, &[22], NONCE, 1)
-            .unwrap();
+        let packet = client.seal(gate.public_key(), &req(&[22], 1)).unwrap();
         let opened = gate.open(&packet).unwrap();
         assert!(!gate.verify(
             Suite::Fips,
@@ -578,9 +682,7 @@ mod tests {
     fn truncated_packet_fails_open() {
         let gate = GateKeypair::generate(Suite::Fips).unwrap();
         let client = ClientKey::generate(Suite::Fips).unwrap();
-        let packet = client
-            .seal(gate.public_key(), GATE_ID, &[22], NONCE, 1)
-            .unwrap();
+        let packet = client.seal(gate.public_key(), &req(&[22], 1)).unwrap();
         for cut in 0..packet.len() {
             assert!(gate.open(&packet[..cut]).is_err(), "len {cut}");
         }

@@ -12,8 +12,8 @@ use std::fs;
 use std::net::UdpSocket;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use spa_common::{Suite, GATE_ID_LEN, NONCE_LEN};
-use spa_crypto::{ClientKey, GateKeypair};
+use spa_common::{Suite, GATE_ID_LEN, NONCE_LEN, THUMBPRINT_LEN};
+use spa_crypto::{seal_psk, ClientKey, GateKeypair, KnockRequest};
 
 fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<String> = std::env::args().collect();
@@ -25,6 +25,15 @@ fn main() -> Result<(), Box<dyn Error>> {
         Some("knock") => knock(
             args.get(2).ok_or("usage: knock <addr:port> <file>")?,
             args.get(3).ok_or("usage: knock <addr:port> <file>")?,
+        ),
+        Some("gen-token") => gen_token(args.get(2).ok_or("usage: gen-token <prefix>")?),
+        Some("enroll-knock") => enroll_knock(
+            args.get(2)
+                .ok_or("usage: enroll-knock <addr:port> <knockfile> <enrollfile>")?,
+            args.get(3)
+                .ok_or("usage: enroll-knock <addr:port> <knockfile> <enrollfile>")?,
+            args.get(4)
+                .ok_or("usage: enroll-knock <addr:port> <knockfile> <enrollfile>")?,
         ),
         Some("gen-anchor") => gen_anchor(args.get(2).ok_or("usage: gen-anchor <prefix>")?),
         Some("sign-bundle") => sign_bundle(
@@ -127,36 +136,111 @@ fn parse_suite(s: &str) -> Result<Suite, Box<dyn Error>> {
     }
 }
 
-fn knock(target: &str, file: &str) -> Result<(), Box<dyn Error>> {
+fn read_kv(file: &str) -> Result<HashMap<String, String>, Box<dyn Error>> {
     let mut kv = HashMap::new();
-    let text = fs::read_to_string(file)?;
-    for line in text.lines() {
+    for line in fs::read_to_string(file)?.lines() {
         if let Some((k, v)) = line.split_once('=') {
             kv.insert(k.trim().to_string(), v.trim().to_string());
         }
     }
-    let get = |k: &str| kv.get(k).cloned().ok_or_else(|| format!("missing {k}"));
+    Ok(kv)
+}
 
-    let gate_pubkey = hex::decode(get("gate_pubkey_hex")?)?;
-    let gate_id_v = hex::decode(get("gate_id_hex")?)?;
-    if gate_id_v.len() != GATE_ID_LEN {
-        return Err("gate_id must be 16 bytes".into());
+fn require<'a>(kv: &'a HashMap<String, String>, k: &str) -> Result<&'a String, Box<dyn Error>> {
+    kv.get(k).ok_or_else(|| format!("missing {k}").into())
+}
+
+fn arr<const N: usize>(hexstr: &str) -> Result<[u8; N], Box<dyn Error>> {
+    let v = hex::decode(hexstr)?;
+    if v.len() != N {
+        return Err(format!("expected {N} bytes, got {}", v.len()).into());
     }
-    let mut gate_id = [0u8; GATE_ID_LEN];
-    gate_id.copy_from_slice(&gate_id_v);
-    let pkcs8 = hex::decode(get("client_pkcs8_hex")?)?;
-    let port: u16 = get("port")?.parse()?;
-    let suite = parse_suite(&get("suite")?)?;
+    let mut a = [0u8; N];
+    a.copy_from_slice(&v);
+    Ok(a)
+}
+
+fn now_nanos() -> Result<u64, Box<dyn Error>> {
+    Ok(SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos() as u64)
+}
+
+fn knock(target: &str, file: &str) -> Result<(), Box<dyn Error>> {
+    let kv = read_kv(file)?;
+    let gate_pubkey = hex::decode(require(&kv, "gate_pubkey_hex")?)?;
+    let gate_id: [u8; GATE_ID_LEN] = arr(require(&kv, "gate_id_hex")?)?;
+    let pkcs8 = hex::decode(require(&kv, "client_pkcs8_hex")?)?;
+    let port: u16 = require(&kv, "port")?.parse()?;
+    let suite = parse_suite(require(&kv, "suite")?)?;
 
     let client = ClientKey::from_pkcs8(suite, &pkcs8)?;
     let nonce: [u8; NONCE_LEN] = random()?;
-    let ts = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos() as u64;
-    let packet = client.seal(&gate_pubkey, gate_id, &[port], nonce, ts)?;
+    let req = KnockRequest {
+        gate_id,
+        ports: &[port],
+        nonce,
+        timestamp_nanos: now_nanos()?,
+    };
+    let packet = client.seal(&gate_pubkey, &req)?;
 
-    let sock = UdpSocket::bind("0.0.0.0:0")?;
-    sock.send_to(&packet, target)?;
+    UdpSocket::bind("0.0.0.0:0")?.send_to(&packet, target)?;
     println!(
         "sent {}-byte knock to {target} (requesting port {port})",
+        packet.len()
+    );
+    Ok(())
+}
+
+/// Generate a one-time enrollment token: a `[[token]]` block for the gate config
+/// plus an `.enroll` file the client uses with `enroll-knock`.
+fn gen_token(prefix: &str) -> Result<(), Box<dyn Error>> {
+    let token_id: [u8; THUMBPRINT_LEN] = random()?;
+    let secret: [u8; 32] = random()?;
+    let port = 9999u16;
+    fs::write(
+        format!("{prefix}.token.toml"),
+        format!(
+            "[[token]]\ntoken_id_hex = \"{}\"\nsecret_hex = \"{}\"\nports = [{port}]\n",
+            hex::encode(token_id),
+            hex::encode(secret),
+        ),
+    )?;
+    fs::write(
+        format!("{prefix}.enroll"),
+        format!(
+            "token_id_hex={}\nsecret_hex={}\n",
+            hex::encode(token_id),
+            hex::encode(secret),
+        ),
+    )?;
+    println!("wrote {prefix}.token.toml and {prefix}.enroll (port={port})");
+    Ok(())
+}
+
+/// Send a PSK enrollment knock: gate info from `knockfile`, the one-time token
+/// from `enrollfile`.
+fn enroll_knock(target: &str, knockfile: &str, enrollfile: &str) -> Result<(), Box<dyn Error>> {
+    let g = read_kv(knockfile)?;
+    let gate_pubkey = hex::decode(require(&g, "gate_pubkey_hex")?)?;
+    let gate_id: [u8; GATE_ID_LEN] = arr(require(&g, "gate_id_hex")?)?;
+    let suite = parse_suite(require(&g, "suite")?)?;
+    let port: u16 = require(&g, "port")?.parse()?;
+
+    let e = read_kv(enrollfile)?;
+    let token_id: [u8; THUMBPRINT_LEN] = arr(require(&e, "token_id_hex")?)?;
+    let secret = hex::decode(require(&e, "secret_hex")?)?;
+
+    let nonce: [u8; NONCE_LEN] = random()?;
+    let req = KnockRequest {
+        gate_id,
+        ports: &[port],
+        nonce,
+        timestamp_nanos: now_nanos()?,
+    };
+    let packet = seal_psk(&gate_pubkey, suite, &secret, token_id, &req)?;
+
+    UdpSocket::bind("0.0.0.0:0")?.send_to(&packet, target)?;
+    println!(
+        "sent {}-byte enrollment knock to {target} (requesting port {port})",
         packet.len()
     );
     Ok(())

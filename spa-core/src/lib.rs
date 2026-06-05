@@ -32,14 +32,30 @@ pub struct Opened {
     pub signing_bytes: Vec<u8>,
 }
 
+/// How a client's knock is authenticated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Auth {
+    /// Asymmetric signature verified against `public_key` (steady state).
+    Signature,
+    /// HMAC keyed by the shared secret in `public_key` (PSK / enrollment token).
+    Psk,
+}
+
 /// What the trust store knows about an authorized client.
 pub struct ClientPolicy {
-    /// Public key used to verify the knock signature.
+    /// Verification key material: the public key (`Signature`) or the shared
+    /// secret (`Psk`).
     pub public_key: Vec<u8>,
-    /// Suite the client's key/signature uses.
+    /// Suite the client's key/signature uses (envelope cipher; ignored for Psk
+    /// verification, which is HMAC-SHA512).
     pub suite: Suite,
     /// Ports this client may request. A knock may open a subset of these.
     pub allowed_ports: Vec<u16>,
+    /// Which authenticator the gate must check.
+    pub auth: Auth,
+    /// If true, the credential is consumed after one successful knock (one-time
+    /// enrollment token).
+    pub single_use: bool,
 }
 
 // ---- Ports (everything the core needs from the outside world) ---------------
@@ -60,15 +76,24 @@ pub trait Crypto {
     /// Verify `signature` over `message` under `public_key`. Constant-time;
     /// returns whether it is valid.
     fn verify(&self, suite: Suite, public_key: &[u8], message: &[u8], signature: &[u8]) -> bool;
+
+    /// Verify the HMAC `mac` over `message` under the shared `key` (PSK mode).
+    /// Constant-time.
+    fn verify_mac(&self, key: &[u8], message: &[u8], mac: &[u8]) -> bool;
 }
 
 /// Opaque crypto failure. The core never inspects the cause.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OpenError;
 
-/// Maps a client key thumbprint to its policy, or `None` if not authorized.
+/// Maps a client key thumbprint (or PSK token id) to its policy, or `None` if
+/// not authorized.
 pub trait TrustStore {
     fn lookup(&self, thumbprint: &[u8; THUMBPRINT_LEN]) -> Option<ClientPolicy>;
+
+    /// Burn a one-time credential after a fully-validated knock. Default no-op
+    /// (steady-state credentials are not single-use).
+    fn consume(&self, _thumbprint: &[u8; THUMBPRINT_LEN]) {}
 }
 
 /// Anti-replay state. Returns `true` if the nonce is fresh (and records it),
@@ -168,12 +193,19 @@ where
             None => return Decision::Rejected(Reject::UnknownClient),
         };
 
-        if !self.crypto.verify(
-            policy.suite,
-            &policy.public_key,
-            &opened.signing_bytes,
-            &auth.signature,
-        ) {
+        let authentic = match policy.auth {
+            Auth::Signature => self.crypto.verify(
+                policy.suite,
+                &policy.public_key,
+                &opened.signing_bytes,
+                &auth.signature,
+            ),
+            Auth::Psk => {
+                self.crypto
+                    .verify_mac(&policy.public_key, &opened.signing_bytes, &auth.signature)
+            }
+        };
+        if !authentic {
             return Decision::Rejected(Reject::BadSignature);
         }
 
@@ -183,6 +215,12 @@ where
 
         if !self.replay.admit(&auth.nonce) {
             return Decision::Rejected(Reject::Replay);
+        }
+
+        // Burn a one-time credential only now that the knock is fully valid, so a
+        // forged knock with a real token id cannot exhaust tokens.
+        if policy.single_use {
+            self.trust.consume(&auth.key_thumbprint);
         }
 
         self.gate
@@ -205,6 +243,7 @@ mod tests {
     use std::collections::HashMap;
     use std::collections::HashSet;
     use std::net::Ipv4Addr;
+    use std::rc::Rc;
 
     use spa_common::{GATE_ID_LEN, NONCE_LEN, SIG_LEN, THUMBPRINT_LEN};
 
@@ -256,18 +295,33 @@ mod tests {
             *self.verify_called.borrow_mut() = true;
             self.verify_ok
         }
+        fn verify_mac(&self, _key: &[u8], _m: &[u8], _mac: &[u8]) -> bool {
+            *self.verify_called.borrow_mut() = true;
+            self.verify_ok
+        }
     }
 
     struct FakeTrust {
         policy: Option<Vec<u16>>,
+        auth: Auth,
+        single_use: bool,
+        consumed: Rc<RefCell<bool>>,
     }
     impl TrustStore for FakeTrust {
         fn lookup(&self, _t: &[u8; THUMBPRINT_LEN]) -> Option<ClientPolicy> {
+            if *self.consumed.borrow() {
+                return None; // a burned one-time token is no longer known
+            }
             self.policy.as_ref().map(|ports| ClientPolicy {
                 public_key: vec![0u8; 65],
                 suite: Suite::Fips,
                 allowed_ports: ports.clone(),
+                auth: self.auth,
+                single_use: self.single_use,
             })
+        }
+        fn consume(&self, _t: &[u8; THUMBPRINT_LEN]) {
+            *self.consumed.borrow_mut() = true;
         }
     }
 
@@ -295,6 +349,8 @@ mod tests {
         opened: Option<Authorization>,
         verify_ok: bool,
         trust_ports: Option<Vec<u16>>,
+        auth: Auth,
+        single_use: bool,
         seen: HashSet<[u8; NONCE_LEN]>,
     }
     impl Harness {
@@ -304,15 +360,22 @@ mod tests {
                 opened: Some(auth(GATE, 1_000, vec![22])),
                 verify_ok: true,
                 trust_ports: Some(vec![22, 8443]),
+                auth: Auth::Signature,
+                single_use: false,
                 seen: HashSet::new(),
             }
         }
         fn run(self, source: IpAddr) -> (Decision, bool, Vec<GateOpen>) {
+            let (d, v, o, _consumed) = self.run_full(source);
+            (d, v, o)
+        }
+        fn run_full(self, source: IpAddr) -> (Decision, bool, Vec<GateOpen>, bool) {
             let crypto = FakeCrypto {
                 opened: self.opened,
                 verify_ok: self.verify_ok,
                 verify_called: RefCell::new(false),
             };
+            let consumed = Rc::new(RefCell::new(false));
             let mut gk = Gatekeeper::new(
                 Config {
                     gate_id: GATE,
@@ -323,13 +386,16 @@ mod tests {
                 crypto,
                 FakeTrust {
                     policy: self.trust_ports,
+                    auth: self.auth,
+                    single_use: self.single_use,
+                    consumed: consumed.clone(),
                 },
                 FakeReplay { seen: self.seen },
                 FakeGate::default(),
             );
             let decision = gk.admit(b"packet", source);
             let verify_called = *gk.crypto.verify_called.borrow();
-            (decision, verify_called, gk.gate.opens)
+            (decision, verify_called, gk.gate.opens, *consumed.borrow())
         }
     }
 
@@ -457,5 +523,53 @@ mod tests {
         assert_eq!(map.get(&[1; THUMBPRINT_LEN]), Some(&vec![22]));
         assert_eq!(map.get(&[2; THUMBPRINT_LEN]), Some(&vec![443]));
         assert_eq!(map.get(&[3; THUMBPRINT_LEN]), None);
+    }
+
+    #[test]
+    fn psk_knock_is_accepted_via_hmac() {
+        let mut h = Harness::ok();
+        h.auth = Auth::Psk;
+        let (d, verified, opens) = h.run(src());
+        assert_eq!(d, Decision::Opened { ports: vec![22] });
+        assert!(verified, "the PSK path still runs an authenticator check");
+        assert_eq!(opens.len(), 1);
+    }
+
+    #[test]
+    fn psk_bad_mac_is_rejected() {
+        let mut h = Harness::ok();
+        h.auth = Auth::Psk;
+        h.verify_ok = false;
+        let (d, _, opens) = h.run(src());
+        assert_eq!(d, Decision::Rejected(Reject::BadSignature));
+        assert!(opens.is_empty());
+    }
+
+    #[test]
+    fn single_use_token_is_consumed_after_valid_knock() {
+        let mut h = Harness::ok();
+        h.auth = Auth::Psk;
+        h.single_use = true;
+        let (d, _, opens, consumed) = h.run_full(src());
+        assert_eq!(d, Decision::Opened { ports: vec![22] });
+        assert!(consumed, "a one-time token must be burned on use");
+        assert_eq!(opens.len(), 1);
+    }
+
+    #[test]
+    fn single_use_token_not_consumed_on_bad_mac() {
+        let mut h = Harness::ok();
+        h.auth = Auth::Psk;
+        h.single_use = true;
+        h.verify_ok = false;
+        let (d, _, _, consumed) = h.run_full(src());
+        assert_eq!(d, Decision::Rejected(Reject::BadSignature));
+        assert!(!consumed, "a forged knock must not be able to burn tokens");
+    }
+
+    #[test]
+    fn signature_client_is_not_consumed() {
+        let (_, _, _, consumed) = Harness::ok().run_full(src());
+        assert!(!consumed, "steady-state credentials are not single-use");
     }
 }
