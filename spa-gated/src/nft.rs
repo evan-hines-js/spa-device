@@ -92,9 +92,6 @@ fn run_stdin(script: &str) -> std::io::Result<()> {
     if child.wait()?.success() {
         Ok(())
     } else {
-        Err(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            "nft -f failed",
-        ))
+        Err(std::io::Error::other("nft -f failed"))
     }
 }

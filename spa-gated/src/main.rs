@@ -24,7 +24,7 @@ use spa_crypto::GateKeypair;
 use spa_ebpf_common::{GateConfig as KernelConfig, Grant};
 
 use adapters::{BpfGateWriter, MemReplay, SharedTrust, SystemClock};
-use config::{ClientEntry, Config};
+use config::{ClientEntry, Config, TokenEntry};
 
 fn main() -> Result<(), Box<dyn Error>> {
     let path = std::env::args()
@@ -37,14 +37,20 @@ fn main() -> Result<(), Box<dyn Error>> {
         (Some(anchor), Some(bpath)) => Some((anchor.clone(), bpath.clone())),
         _ => None,
     };
-    let (clients, ports, generation): (Vec<ClientEntry>, Vec<u16>, u64) = match &bundle_src {
-        Some((anchor, bpath)) => {
-            let b = bundle::load_verify(bpath, anchor)?;
-            audit::bundle("loaded", Some(b.generation), None);
-            (b.clients, b.protected_ports, b.generation)
-        }
-        None => (cfg.clients.clone(), cfg.protected_ports.clone(), 0),
-    };
+    let (clients, tokens, ports, generation): (Vec<ClientEntry>, Vec<TokenEntry>, Vec<u16>, u64) =
+        match &bundle_src {
+            Some((anchor, bpath)) => {
+                let b = bundle::load_verify(bpath, anchor)?;
+                audit::bundle("loaded", Some(b.generation), None);
+                (b.clients, b.tokens, b.protected_ports, b.generation)
+            }
+            None => (
+                cfg.clients.clone(),
+                cfg.tokens.clone(),
+                cfg.protected_ports.clone(),
+                0,
+            ),
+        };
 
     // Load + attach the XDP program.
     let mut ebpf = Ebpf::load(&std::fs::read(&cfg.bpf_object)?)?;
@@ -91,7 +97,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let gate_key = GateKeypair::from_raw_private(cfg.suite, &cfg.gate_private)?;
     let trust = SharedTrust::new(cfg.suite);
     trust.set(&clients);
-    trust.set_tokens(&cfg.tokens);
+    trust.set_tokens(&tokens);
     let replay = MemReplay::new(Duration::from_secs(cfg.skew_seconds * 2 + 1));
     let gate_cfg = GateConfig {
         gate_id: cfg.gate_id,
@@ -137,7 +143,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         suite,
         &ports,
         clients.len(),
-        cfg.tokens.len(),
+        tokens.len(),
         cfg.nftables_floor,
     );
 
@@ -191,6 +197,7 @@ fn watch_bundle(
         }
 
         trust.set(&b.clients);
+        trust.set_tokens(&b.tokens);
         let new_ports: HashSet<u16> = b.protected_ports.iter().copied().collect();
         for p in new_ports.difference(&known_ports) {
             let _ = protected.insert(*p, 1u8, 0);
@@ -207,8 +214,9 @@ fn watch_bundle(
             "applied",
             Some(applied_gen),
             Some(format!(
-                "{} clients, ports {:?}",
+                "{} clients, {} tokens, ports {:?}",
                 b.clients.len(),
+                b.tokens.len(),
                 b.protected_ports
             )),
         );

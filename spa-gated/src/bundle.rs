@@ -12,7 +12,7 @@ use std::error::Error;
 use serde::Deserialize;
 use spa_common::Suite;
 
-use crate::config::{parse_clients, ClientEntry, RawClient};
+use crate::config::{parse_clients, parse_tokens, ClientEntry, RawClient, RawToken, TokenEntry};
 
 /// Raw signature length (Ed25519).
 const SIG_LEN: usize = 64;
@@ -21,6 +21,7 @@ pub struct Bundle {
     pub generation: u64,
     pub protected_ports: Vec<u16>,
     pub clients: Vec<ClientEntry>,
+    pub tokens: Vec<TokenEntry>,
 }
 
 #[derive(Deserialize)]
@@ -30,6 +31,8 @@ struct RawBundle {
     protected_ports: Vec<u16>,
     #[serde(default)]
     client: Vec<RawClient>,
+    #[serde(default)]
+    token: Vec<RawToken>,
 }
 
 /// Read, verify (signature against `anchor_pubkey`), and parse a bundle file.
@@ -47,5 +50,6 @@ pub fn load_verify(path: &str, anchor_pubkey: &[u8]) -> Result<Bundle, Box<dyn E
         generation: raw.generation,
         protected_ports: raw.protected_ports,
         clients: parse_clients(raw.client)?,
+        tokens: parse_tokens(raw.token)?,
     })
 }

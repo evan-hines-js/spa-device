@@ -47,10 +47,10 @@ pub(crate) struct RawClient {
 }
 
 #[derive(Deserialize)]
-struct RawToken {
-    token_id_hex: String,
-    secret_hex: String,
-    ports: Vec<u16>,
+pub(crate) struct RawToken {
+    pub token_id_hex: String,
+    pub secret_hex: String,
+    pub ports: Vec<u16>,
 }
 
 fn default_pinhole() -> u64 {
@@ -128,7 +128,7 @@ impl Config {
     }
 }
 
-fn parse_tokens(raw: Vec<RawToken>) -> Result<Vec<TokenEntry>, Box<dyn Error>> {
+pub(crate) fn parse_tokens(raw: Vec<RawToken>) -> Result<Vec<TokenEntry>, Box<dyn Error>> {
     let mut out = Vec::with_capacity(raw.len());
     for t in raw {
         out.push(TokenEntry {

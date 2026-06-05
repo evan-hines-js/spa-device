@@ -182,11 +182,13 @@ spa-client gen-token tok                        # one-time PSK enrollment token
 spa-client enroll-knock <host>:62201 demo.knock tok.enroll
 ```
 
-A signed bundle carries a monotonic `generation`, the protected ports, and the
-authorized clients; the daemon verifies it against the pinned anchor and
-hot-reloads it (older generations are refused). A one-time token authenticates a
-single PSK knock — the canonical bootstrap for an endpoint that has no registered
-key yet — and is burned on use.
+A signed bundle carries a monotonic `generation`, the protected ports, the
+authorized clients, and any one-time enrollment `[[token]]`s; the daemon verifies
+it against the pinned anchor and hot-reloads it (older generations are refused).
+A one-time token authenticates a single PSK knock — the canonical bootstrap for an
+endpoint that has no registered key yet — and is burned on use. Tokens may be
+carried inline in the local config or in the signed bundle (so the control plane
+can push and rotate them with the same anti-rollback hot-reload as clients).
 
 ## Status
 
