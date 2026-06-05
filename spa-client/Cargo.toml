@@ -12,3 +12,9 @@ spa-common = { path = "../spa-common" }
 spa-crypto = { path = "../spa-crypto" }
 aws-lc-rs = "1"
 hex = "0.4"
+tokio = { version = "1", optional = true, features = ["time"] }
+
+[features]
+# Opt-in async helper (`Knocker::with_open_async`). No async runtime is pulled in
+# unless this is enabled; the default build stays sync and runtime-neutral.
+tokio = ["dep:tokio"]

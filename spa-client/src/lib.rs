@@ -159,6 +159,42 @@ impl Knocker {
         }
         Err(Error::Unreachable(last))
     }
+
+    /// Async counterpart of [`with_open`](Self::with_open) (requires the `tokio`
+    /// feature). `connect` returns a future; the grace and retries use
+    /// `tokio::time`. `knock` itself is a non-blocking UDP send, so awaiting is
+    /// only needed around the sleep and the caller's connect.
+    ///
+    /// ```ignore
+    /// // spa-client = { ..., features = ["tokio"] }
+    /// let stream = knocker
+    ///     .with_open_async("gate:62201", &ports, 3, || tokio::net::TcpStream::connect("gate:22"))
+    ///     .await?;
+    /// ```
+    #[cfg(feature = "tokio")]
+    pub async fn with_open_async<T, E, Fut, F>(
+        &self,
+        target: &str,
+        ports: &[u16],
+        attempts: u32,
+        mut connect: F,
+    ) -> Result<T, Error>
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = Result<T, E>>,
+        E: fmt::Display,
+    {
+        let mut last = String::new();
+        for _ in 0..attempts.max(1) {
+            self.knock(target, ports)?;
+            tokio::time::sleep(Duration::from_millis(KNOCK_GRACE_MS)).await;
+            match connect().await {
+                Ok(value) => return Ok(value),
+                Err(e) => last = e.to_string(),
+            }
+        }
+        Err(Error::Unreachable(last))
+    }
 }
 
 /// A one-time-token enrollment client: the bootstrap knock for an endpoint that

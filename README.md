@@ -138,10 +138,23 @@ let stream = knocker.with_open("gate.example:62201", &[22], 3, || {
 ```
 
 `with_open` handles the ordering, the brief grace before the SYN, and re-knocking
-on a transient failure. Use the lower-level `knocker.knock(target, ports)` if you
-want to drive the connection yourself (e.g. async). `Knocker::from_knock_file()`
-loads the keygen file format; `Enroller` does the one-time-token bootstrap. The
-library is cross-platform (no eBPF); only the gate is Linux-only.
+on a transient failure. `Knocker::from_knock_file()` loads the keygen file format;
+`Enroller` does the one-time-token bootstrap. The library is cross-platform (no
+eBPF); only the gate is Linux-only.
+
+`knock()`/`seal()` are sync but non-blocking (no network wait — just a UDP send),
+so they're usable from async code directly. For an async knock-then-connect
+helper, enable the optional `tokio` feature (no async dependency by default):
+
+```toml
+spa-client = { version = "...", features = ["tokio"] }
+```
+
+```rust
+let stream = knocker
+    .with_open_async("gate:62201", &ports, 3, || tokio::net::TcpStream::connect("gate:22"))
+    .await?;
+```
 
 ## Config reference (`gated.toml`)
 
