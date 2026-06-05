@@ -1,2 +1,12 @@
 /target
 /dist
+
+# Local demo / provisioning artifacts — keys and descriptors, never commit.
+*.client.key
+*.knock
+*.gate.toml
+*.anchor.key
+*.enroll
+*.token.toml
+*.bundle
+descriptor.json

@@ -50,6 +50,11 @@ enum Event<'a> {
         #[serde(skip_serializing_if = "Option::is_none")]
         detail: Option<String>,
     },
+    ControlPlane {
+        ts_ms: u128,
+        action: &'a str,
+        detail: String,
+    },
 }
 
 fn emit(event: &Event) {
@@ -112,6 +117,15 @@ pub fn bundle(action: &str, generation: Option<u64>, detail: Option<String>) {
         ts_ms: ts_ms(),
         action,
         generation,
+        detail,
+    });
+}
+
+/// Gate self-provisioning against the control plane (identity report, bundle pull).
+pub fn control_plane(action: &str, detail: String) {
+    emit(&Event::ControlPlane {
+        ts_ms: ts_ms(),
+        action,
         detail,
     });
 }

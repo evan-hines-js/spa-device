@@ -7,6 +7,7 @@ mod adapters;
 mod audit;
 mod bundle;
 mod config;
+mod cp;
 mod nft;
 
 use std::collections::HashSet;
@@ -31,6 +32,37 @@ fn main() -> Result<(), Box<dyn Error>> {
         .nth(1)
         .unwrap_or_else(|| "/etc/spa/gated.toml".to_string());
     let cfg = Config::load(&path)?;
+
+    // Bind the knock socket first: it doubles as a single-instance lock, so a
+    // second spa-gated on this host fails here with a clear "port in use" instead
+    // of half-starting and then dying on an opaque XDP ResourceBusy (which would
+    // silently leave a config change unapplied). Dual-stack `[::]` (IPv6 +
+    // IPv4-mapped); fall back to IPv4-only where IPv6 is unavailable.
+    let sock = UdpSocket::bind(("::", cfg.knock_port))
+        .or_else(|_| UdpSocket::bind(("0.0.0.0", cfg.knock_port)))
+        .map_err(|e| {
+            format!(
+                "bind knock port {}: {e} — is another spa-gated already running on this host?",
+                cfg.knock_port
+            )
+        })?;
+
+    // Self-provision against the control plane if configured: register our own
+    // knock identity (derived from our keypair, never hand-grepped — so it can't
+    // be the wrong key) and pull the signed bundle. Idempotent: every start
+    // re-asserts the correct identity, which self-heals a stale descriptor.
+    if let Some(cp) = &cfg.control_plane {
+        // Pin the control-plane TLS to our aws-lc-rs provider (no second stack).
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        let pubkey_hex =
+            hex::encode(GateKeypair::from_raw_private(cfg.suite, &cfg.gate_private)?.public_key());
+        cp::register_identity(cp, &pubkey_hex, cfg.knock_port)?;
+        audit::control_plane("registered", pubkey_hex);
+        if let Some(bpath) = &cfg.bundle_path {
+            cp::fetch_bundle(cp, bpath)?;
+            audit::control_plane("bundle-fetched", bpath.clone());
+        }
+    }
 
     // Dynamic policy: from a signed bundle if configured, else inline config.
     let bundle_src = match (&cfg.config_anchor, &cfg.bundle_path) {
@@ -60,7 +92,12 @@ fn main() -> Result<(), Box<dyn Error>> {
             .ok_or("missing program spa_gate")?
             .try_into()?;
         prog.load()?;
-        prog.attach(&cfg.interface, XdpFlags::SKB_MODE)?;
+        // Drop any leftover XDP program first so a restart isn't blocked by a
+        // stale attach. Safe: the knock-port bind above is a single-instance
+        // lock, so by here anything still on the NIC is genuinely orphaned.
+        clear_stale_xdp(&cfg.interface);
+        prog.attach(&cfg.interface, XdpFlags::SKB_MODE)
+            .map_err(|e| format!("attach XDP to {}: {e}", cfg.interface))?;
     }
 
     // Tell the data plane the knock port so it can size-filter + rate-limit it.
@@ -128,11 +165,22 @@ fn main() -> Result<(), Box<dyn Error>> {
         });
     }
 
+    // Periodically re-pull the bundle so control-plane changes (a new enrollment,
+    // a revoke) propagate with no operator action; the watcher above hot-reloads
+    // whatever lands. Only re-pulls when configured to self-provision.
+    if let (Some(cp), Some(bpath)) = (cfg.control_plane.clone(), cfg.bundle_path.clone()) {
+        std::thread::spawn(move || loop {
+            std::thread::sleep(Duration::from_secs(20));
+            match cp::fetch_bundle(&cp, &bpath) {
+                Ok(true) => audit::control_plane("bundle-fetched", bpath.clone()),
+                Ok(false) => {}
+                Err(e) => audit::control_plane("fetch-error", e.to_string()),
+            }
+        });
+    }
+
     // Knock loop. `ebpf` is held for the process lifetime to keep the program
-    // attached. Prefer a dual-stack `[::]` socket (receives both IPv6 and
-    // IPv4-mapped IPv4); fall back to IPv4-only where IPv6 is unavailable.
-    let sock = UdpSocket::bind(("::", cfg.knock_port))
-        .or_else(|_| UdpSocket::bind(("0.0.0.0", cfg.knock_port)))?;
+    // attached; `sock` was bound up front as the single-instance lock.
     let suite = match cfg.suite {
         Suite::Fips => "fips",
         Suite::Modern => "modern",
@@ -153,6 +201,16 @@ fn main() -> Result<(), Box<dyn Error>> {
         let decision = gatekeeper.admit(&buf[..n], src.ip());
         audit::knock(src.ip(), &decision);
     }
+}
+
+/// Best-effort detach of any leftover XDP program on `iface` before we attach,
+/// so a restart isn't blocked by a stale attach (`ResourceBusy`). Mirrors the
+/// daemon's existing reliance on userspace `nft`; failures are ignored because a
+/// clean interface is the common case.
+fn clear_stale_xdp(iface: &str) {
+    let _ = std::process::Command::new("ip")
+        .args(["link", "set", "dev", iface, "xdpgeneric", "off"])
+        .status();
 }
 
 /// Poll the bundle file; on change, verify it, enforce anti-rollback, and

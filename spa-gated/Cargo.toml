@@ -20,3 +20,12 @@ serde_json = "1"
 toml = "0.8"
 hex = "0.4"
 libc = "0.2"
+# Control-plane self-provisioning only (identity report + bundle pull), off the
+# packet fast path. rustls pinned to the shared aws-lc-rs provider (the
+# -no-provider feature drops reqwest's default `ring`, so there is no second
+# crypto stack); blocking so the sync daemon needs no async runtime of its own.
+reqwest = { version = "0.12", default-features = false, features = [
+    "blocking",
+    "rustls-tls-webpki-roots-no-provider",
+] }
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std", "tls12", "logging"] }

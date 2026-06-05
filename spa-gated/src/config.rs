@@ -37,6 +37,21 @@ struct Raw {
     client: Vec<RawClient>,
     #[serde(default)]
     token: Vec<RawToken>,
+    // When set, the gate self-provisions: registers its own knock identity and
+    // pulls its signed bundle from the control plane (no manual curl/grep).
+    #[serde(default)]
+    control_plane: Option<RawControlPlane>,
+}
+
+#[derive(Deserialize)]
+struct RawControlPlane {
+    url: String,
+    gate_token: String,
+    address: String,
+    /// PEM CA to trust for the control-plane TLS (private PKI). Optional; system
+    /// roots are used when absent.
+    #[serde(default)]
+    ca_cert: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -79,6 +94,17 @@ pub struct TokenEntry {
     pub ports: Vec<u16>,
 }
 
+/// Control-plane endpoint for gate self-provisioning. `address` is how clients
+/// reach this gate (published in the descriptor); `gate_token` authenticates the
+/// gate. `url` must be HTTPS; `ca_cert` pins a private CA when set.
+#[derive(Clone)]
+pub struct ControlPlane {
+    pub url: String,
+    pub gate_token: String,
+    pub address: String,
+    pub ca_cert: Option<String>,
+}
+
 pub struct Config {
     pub interface: String,
     pub knock_port: u16,
@@ -95,6 +121,7 @@ pub struct Config {
     pub protected_ports: Vec<u16>,
     pub clients: Vec<ClientEntry>,
     pub tokens: Vec<TokenEntry>,
+    pub control_plane: Option<ControlPlane>,
 }
 
 impl Config {
@@ -124,8 +151,24 @@ impl Config {
             protected_ports: raw.protected_ports,
             clients: parse_clients(raw.client)?,
             tokens: parse_tokens(raw.token)?,
+            control_plane: match raw.control_plane {
+                Some(c) => Some(parse_control_plane(c)?),
+                None => None,
+            },
         })
     }
+}
+
+fn parse_control_plane(c: RawControlPlane) -> Result<ControlPlane, Box<dyn Error>> {
+    if !c.url.starts_with("https://") {
+        return Err(format!("control_plane.url must be https:// (got {:?})", c.url).into());
+    }
+    Ok(ControlPlane {
+        url: c.url,
+        gate_token: c.gate_token,
+        address: c.address,
+        ca_cert: c.ca_cert,
+    })
 }
 
 pub(crate) fn parse_tokens(raw: Vec<RawToken>) -> Result<Vec<TokenEntry>, Box<dyn Error>> {
