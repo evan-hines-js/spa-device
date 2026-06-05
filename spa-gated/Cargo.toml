@@ -1,0 +1,21 @@
+[package]
+name = "spa-gated"
+version = "0.1.0"
+edition = "2021"
+
+# The SPA gate daemon (Linux-only): loads the XDP data plane, attaches it,
+# manages the BPF maps, and runs the knock-verification loop by wiring the pure
+# spa-core Gatekeeper to real adapters (aya maps, system clocks, in-memory
+# replay, config-driven trust). Excluded from the workspace; built on the Linux
+# host. See DESIGN.md §3.2.
+
+[dependencies]
+spa-common = { path = "../spa-common" }
+spa-core = { path = "../spa-core" }
+spa-crypto = { path = "../spa-crypto" }
+spa-ebpf-common = { path = "../spa-ebpf-common", features = ["user"] }
+aya = "0.13"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+hex = "0.4"
+libc = "0.2"

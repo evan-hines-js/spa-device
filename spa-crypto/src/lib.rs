@@ -43,6 +43,19 @@ pub enum CryptoError {
     Crypto,
 }
 
+impl core::fmt::Display for CryptoError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(match self {
+            CryptoError::Key => "key error",
+            CryptoError::Sign => "signing failed",
+            CryptoError::Encode => "authorization encode failed",
+            CryptoError::Crypto => "crypto operation failed",
+        })
+    }
+}
+
+impl std::error::Error for CryptoError {}
+
 // ---- suite → algorithm selection -------------------------------------------
 
 fn agreement_alg(suite: Suite) -> &'static agreement::Algorithm {
@@ -177,6 +190,36 @@ impl GateKeypair {
         })
     }
 
+    /// Load a gate key from its raw 32-byte private key (the persisted form).
+    pub fn from_raw_private(suite: Suite, raw: &[u8]) -> Result<Self, CryptoError> {
+        let private = agreement::PrivateKey::from_private_key(agreement_alg(suite), raw)
+            .map_err(|_| CryptoError::Key)?;
+        let public = private
+            .compute_public_key()
+            .map_err(|_| CryptoError::Key)?
+            .as_ref()
+            .to_vec();
+        Ok(GateKeypair {
+            suite,
+            private,
+            public,
+        })
+    }
+
+    /// Generate a fresh gate key and return it alongside its raw 32-byte private
+    /// key for persistence. (aws-lc-rs agreement keys cannot be exported after
+    /// generation, so we generate the raw scalar ourselves and load it.)
+    pub fn generate_raw(suite: Suite) -> Result<(Self, [u8; 32]), CryptoError> {
+        for _ in 0..16 {
+            let mut raw = [0u8; 32];
+            aws_lc_rs::rand::fill(&mut raw).map_err(|_| CryptoError::Key)?;
+            if let Ok(kp) = Self::from_raw_private(suite, &raw) {
+                return Ok((kp, raw));
+            }
+        }
+        Err(CryptoError::Key)
+    }
+
     /// The gate's public key — distributed to clients so they can seal to it.
     pub fn public_key(&self) -> &[u8] {
         &self.public
@@ -263,6 +306,49 @@ impl ClientKey {
             public,
             thumbprint,
         })
+    }
+
+    /// Load a client key from PKCS#8 (the persisted form). Ed25519 (Modern) and
+    /// ECDSA P-256 (FIPS) both import; only Ed25519 currently exports
+    /// ([`to_pkcs8`](Self::to_pkcs8)).
+    pub fn from_pkcs8(suite: Suite, pkcs8: &[u8]) -> Result<Self, CryptoError> {
+        let (signer, public) = match suite {
+            Suite::Fips => {
+                let kp = signature::EcdsaKeyPair::from_pkcs8(
+                    &signature::ECDSA_P256_SHA256_FIXED_SIGNING,
+                    pkcs8,
+                )
+                .map_err(|_| CryptoError::Key)?;
+                let pubk = kp.public_key().as_ref().to_vec();
+                (Signer::Ecdsa(kp), pubk)
+            }
+            Suite::Modern => {
+                let kp =
+                    signature::Ed25519KeyPair::from_pkcs8(pkcs8).map_err(|_| CryptoError::Key)?;
+                let pubk = kp.public_key().as_ref().to_vec();
+                (Signer::Ed25519(kp), pubk)
+            }
+        };
+        let thumbprint = thumbprint_of(&public);
+        Ok(ClientKey {
+            suite,
+            signer,
+            public,
+            thumbprint,
+        })
+    }
+
+    /// Export the client key as PKCS#8 for persistence. Ed25519 only; ECDSA
+    /// P-256 keys must be provisioned as DER (aws-lc-rs has no ECDSA export).
+    pub fn to_pkcs8(&self) -> Result<Vec<u8>, CryptoError> {
+        match &self.signer {
+            Signer::Ed25519(kp) => Ok(kp
+                .to_pkcs8()
+                .map_err(|_| CryptoError::Key)?
+                .as_ref()
+                .to_vec()),
+            Signer::Ecdsa(_) => Err(CryptoError::Key),
+        }
     }
 
     pub fn public_key(&self) -> &[u8] {
@@ -392,6 +478,36 @@ mod tests {
     fn thumbprint_is_sha256_of_pubkey() {
         let client = ClientKey::generate(Suite::Fips).unwrap();
         assert_eq!(client.thumbprint(), &thumbprint_of(client.public_key()));
+    }
+
+    #[test]
+    fn gate_raw_key_round_trips() {
+        for suite in [Suite::Fips, Suite::Modern] {
+            let (gate, raw) = GateKeypair::generate_raw(suite).unwrap();
+            let reloaded = GateKeypair::from_raw_private(suite, &raw).unwrap();
+            // Same key → same public key, and a knock sealed to it opens.
+            assert_eq!(gate.public_key(), reloaded.public_key());
+            let client = ClientKey::generate(suite).unwrap();
+            let packet = client
+                .seal(reloaded.public_key(), GATE_ID, &[22], NONCE, 1)
+                .unwrap();
+            assert!(gate.open(&packet).is_ok());
+        }
+    }
+
+    #[test]
+    fn client_pkcs8_round_trips_modern() {
+        let client = ClientKey::generate(Suite::Modern).unwrap();
+        let pkcs8 = client.to_pkcs8().unwrap();
+        let reloaded = ClientKey::from_pkcs8(Suite::Modern, &pkcs8).unwrap();
+        assert_eq!(client.thumbprint(), reloaded.thumbprint());
+        assert_eq!(client.public_key(), reloaded.public_key());
+    }
+
+    #[test]
+    fn client_fips_export_unsupported_but_import_works() {
+        let client = ClientKey::generate(Suite::Fips).unwrap();
+        assert!(client.to_pkcs8().is_err());
     }
 
     #[test]

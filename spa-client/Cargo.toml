@@ -1,0 +1,14 @@
+[package]
+name = "spa-client"
+version = "0.1.0"
+edition = "2021"
+
+# The knock client: builds and sends the single SPA packet before a connection.
+# Cross-platform userland (no eBPF, no aya). Also provides `keygen` for test/dev
+# provisioning. See DESIGN.md §3.3.
+
+[dependencies]
+spa-common = { path = "../spa-common" }
+spa-crypto = { path = "../spa-crypto" }
+aws-lc-rs = "1"
+hex = "0.4"

@@ -4,7 +4,9 @@
 //! feature adds `aya::Pod` impls used only by the loader. See `DESIGN.md` §3.
 
 #![no_std]
-#![forbid(unsafe_code)]
+// `deny` (not `forbid`) so the `user` feature can locally allow the `unsafe impl
+// aya::Pod` below; the rest of the crate stays unsafe-free.
+#![deny(unsafe_code)]
 
 /// Maximum ports a single grant may cover. Matches `spa_common::MAX_PORTS`.
 pub const MAX_GRANT_PORTS: usize = 8;
