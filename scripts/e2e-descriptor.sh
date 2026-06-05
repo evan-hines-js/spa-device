@@ -60,13 +60,14 @@ THUMB=$(printf %s "$PUB" | xxd -r -p | sha256sum | cut -d' ' -f1)
 GATE_PUB=$(grep '^gate_pubkey_hex=' gate.knock | cut -d= -f2)
 GATE_ID=$(grep '^gate_id_hex=' gate.knock | cut -d= -f2)
 
-# What Argus surfaces as the gate's client descriptor.
+# What Argus surfaces as the gate's client descriptor (ports = policy-allowed).
 cat > descriptor.json <<EOF
 { "gate_id_hex": "$GATE_ID",
   "gate_pubkey_hex": "$GATE_PUB",
   "suite": "modern",
   "address": "$GATE",
-  "knock_port": $KNOCK_PORT }
+  "knock_port": $KNOCK_PORT,
+  "ports": [$PORT] }
 EOF
 
 # Gate config authorizes the enrolled client by thumbprint (as a bundle would).
@@ -93,7 +94,8 @@ assert() { if [ "$2" = "$3" ]; then echo "  PASS: $1"; else echo "  FAIL: $1 (ex
 
 echo "== assertions =="
 assert "no knock is cloaked" BLOCKED "$(connect)"
-"$CLI" knock-descriptor "$WORK/descriptor.json" "$WORK/cli.client.key" "$PORT" >/dev/null; sleep 0.4
+# Doc-style 2-arg form: bare prefix (resolves cli.client.key), ports from descriptor.
+"$CLI" knock-descriptor "$WORK/descriptor.json" "$WORK/cli" >/dev/null; sleep 0.4
 assert "descriptor knock opens the port" CONNECTED "$(connect)"
 assert "gate authorized the enrolled client" 1 "$(grep -c '"outcome":"open"' "$WORK/gated.log")"
 

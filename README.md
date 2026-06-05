@@ -199,12 +199,15 @@ control plane publishes once the gate reports its identity:
 ```sh
 spa-client gen-client me                       # -> me.client.key, prints public_key_hex
 #   register public_key_hex with the control plane (it returns the thumbprint)
-spa-client knock-descriptor descriptor.json me.client.key 22 && ssh user@<gate>
+spa-client knock-descriptor descriptor.json me && ssh user@<gate>
 ```
 
 `gen-client` mints a standalone identity (no throwaway gate); `knock-descriptor`
-consumes the control plane's descriptor JSON so there is nothing to hand-assemble.
-`{ "gate_id_hex", "gate_pubkey_hex", "suite", "address", "knock_port" }`.
+consumes the control plane's descriptor JSON so there is nothing to hand-assemble:
+`{ "gate_id_hex", "gate_pubkey_hex", "suite", "address", "knock_port", "ports" }`.
+The requested `ports` come from the descriptor's policy-allowed list; pass a final
+`<ports>` argument only to override. The client key accepts the bare `gen-client`
+prefix (`me`) or the full `me.client.key`.
 
 ## Status
 

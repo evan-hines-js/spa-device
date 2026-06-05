@@ -4,7 +4,7 @@
 //!   spa-client keygen <prefix> [fips|modern]    # gate + client key material
 //!   spa-client gen-client <prefix> [fips|modern]      # standalone client identity
 //!   spa-client knock <addr:port> <file>         # open a cloaked port
-//!   spa-client knock-descriptor <descriptor.json> <client.key> <ports>
+//!   spa-client knock-descriptor <descriptor.json> <client.key> [ports]
 //!   spa-client gen-token <prefix>               # one-time enrollment token
 //!   spa-client enroll-knock <addr:port> <knockfile> <enrollfile>
 //!   spa-client gen-anchor <prefix>              # control-plane signing key
@@ -35,11 +35,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         ),
         Some("knock-descriptor") => knock_descriptor(
             args.get(2)
-                .ok_or("usage: knock-descriptor <descriptor.json> <client.key> <ports>")?,
+                .ok_or("usage: knock-descriptor <descriptor.json> <client.key> [ports]")?,
             args.get(3)
-                .ok_or("usage: knock-descriptor <descriptor.json> <client.key> <ports>")?,
-            args.get(4)
-                .ok_or("usage: knock-descriptor <descriptor.json> <client.key> <ports>")?,
+                .ok_or("usage: knock-descriptor <descriptor.json> <client.key> [ports]")?,
+            args.get(4).map(String::as_str),
         ),
         Some("gen-token") => gen_token(args.get(2).ok_or("usage: gen-token <prefix>")?),
         Some("enroll-knock") => enroll_knock(
@@ -65,7 +64,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                  keygen <prefix> [fips|modern]\n  \
                  gen-client <prefix> [fips|modern]\n  \
                  knock <addr:port> <file>\n  \
-                 knock-descriptor <descriptor.json> <client.key> <ports>\n  \
+                 knock-descriptor <descriptor.json> <client.key> [ports]\n  \
                  gen-token <prefix>\n  \
                  enroll-knock <addr:port> <knockfile> <enrollfile>\n  \
                  gen-anchor <prefix>\n  \
@@ -103,7 +102,15 @@ fn gen_client(prefix: &str, suite_name: &str) -> Result<(), Box<dyn Error>> {
 /// Knock a real gate from the control plane's gate descriptor (the gate's knock
 /// pubkey, gate_id, suite, address, knock_port) plus this client's `gen-client`
 /// key. This is the production path — no throwaway gate, no manual target.
-fn knock_descriptor(descriptor: &str, client_key: &str, ports: &str) -> Result<(), Box<dyn Error>> {
+///
+/// `ports` is optional: when omitted, the descriptor's policy-allowed `ports` are
+/// requested; pass it only to override. `client_key` accepts the bare prefix from
+/// `gen-client <prefix>` as well as the full `<prefix>.client.key` filename.
+fn knock_descriptor(
+    descriptor: &str,
+    client_key: &str,
+    ports: Option<&str>,
+) -> Result<(), Box<dyn Error>> {
     let text = fs::read_to_string(descriptor)
         .map_err(|e| format!("reading descriptor {descriptor}: {e}"))?;
     let d: serde_json::Value =
@@ -116,14 +123,22 @@ fn knock_descriptor(descriptor: &str, client_key: &str, ports: &str) -> Result<(
         .get("knock_port")
         .and_then(serde_json::Value::as_u64)
         .ok_or("descriptor: missing/invalid knock_port")?;
-    let key_hex = fs::read_to_string(client_key)
-        .map_err(|e| format!("reading client key {client_key} (from `gen-client`): {e}"))?;
-    let pkcs8 = hex::decode(key_hex.trim()).map_err(|e| format!("client key {client_key}: {e}"))?;
-    let ports: Vec<u16> = ports
-        .split(',')
-        .map(|p| p.trim().parse::<u16>())
-        .collect::<Result<_, _>>()
-        .map_err(|_| "invalid ports (comma-separated u16)")?;
+
+    // `gen-client <p>` writes `<p>.client.key`; accept the bare prefix too.
+    let key_path = if std::path::Path::new(client_key).exists() {
+        client_key.to_string()
+    } else {
+        format!("{client_key}.client.key")
+    };
+    let key_hex = fs::read_to_string(&key_path)
+        .map_err(|e| format!("reading client key {key_path} (from `gen-client`): {e}"))?;
+    let pkcs8 = hex::decode(key_hex.trim()).map_err(|e| format!("client key {key_path}: {e}"))?;
+
+    // Explicit ports override; otherwise the descriptor's policy-allowed list.
+    let ports = match ports {
+        Some(s) => parse_ports(s)?,
+        None => descriptor_ports(&d)?,
+    };
 
     let knocker = Knocker::new(suite, gate_pubkey, gate_id, &pkcs8)?;
     // Bracket a bare IPv6 literal so `host:port` parses.
@@ -135,6 +150,29 @@ fn knock_descriptor(descriptor: &str, client_key: &str, ports: &str) -> Result<(
     knocker.knock(&target, &ports)?;
     println!("sent knock to {target} (requesting ports {ports:?})");
     Ok(())
+}
+
+fn parse_ports(s: &str) -> Result<Vec<u16>, Box<dyn Error>> {
+    s.split(',')
+        .map(|p| p.trim().parse::<u16>())
+        .collect::<Result<_, _>>()
+        .map_err(|_| "invalid ports (comma-separated u16)".into())
+}
+
+/// The policy-allowed ports the control plane put in the descriptor.
+fn descriptor_ports(d: &serde_json::Value) -> Result<Vec<u16>, Box<dyn Error>> {
+    let arr = d.get("ports").and_then(serde_json::Value::as_array).ok_or(
+        "no <ports> given and the descriptor has no \"ports\" — pass them or have \
+         the control plane include them in the descriptor",
+    )?;
+    arr.iter()
+        .map(|v| {
+            v.as_u64()
+                .filter(|n| *n <= u64::from(u16::MAX))
+                .map(|n| n as u16)
+                .ok_or_else(|| "descriptor \"ports\": non-u16 entry".into())
+        })
+        .collect()
 }
 
 fn field<'a>(v: &'a serde_json::Value, k: &str) -> Result<&'a str, Box<dyn Error>> {
