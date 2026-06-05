@@ -17,7 +17,9 @@ struct Raw {
     knock_port: u16,
     suite: String,
     gate_private_hex: String,
-    gate_id_hex: String,
+    // Optional: a self-provisioning gate learns its gate_id from the control plane.
+    #[serde(default)]
+    gate_id_hex: Option<String>,
     bpf_object: String,
     #[serde(default = "default_pinhole")]
     pinhole_ms: u64,
@@ -110,7 +112,9 @@ pub struct Config {
     pub knock_port: u16,
     pub suite: Suite,
     pub gate_private: Vec<u8>,
-    pub gate_id: [u8; GATE_ID_LEN],
+    /// 16-byte gate identity. `None` when self-provisioning — fetched from the
+    /// control plane at registration (so it can't be hand-pinned wrong).
+    pub gate_id: Option<[u8; GATE_ID_LEN]>,
     pub bpf_object: String,
     pub pinhole_ms: u64,
     pub skew_seconds: u64,
@@ -126,7 +130,8 @@ pub struct Config {
 
 impl Config {
     pub fn load(path: &str) -> Result<Config, Box<dyn Error>> {
-        let raw: Raw = toml::from_str(&fs::read_to_string(path)?)?;
+        let text = fs::read_to_string(path).map_err(|e| format!("reading config {path}: {e}"))?;
+        let raw: Raw = toml::from_str(&text).map_err(|e| format!("parsing config {path}: {e}"))?;
         let suite = match raw.suite.as_str() {
             "fips" => Suite::Fips,
             "modern" => Suite::Modern,
@@ -141,7 +146,10 @@ impl Config {
             knock_port: raw.knock_port,
             suite,
             gate_private: hex_len(&raw.gate_private_hex, 32, "gate_private_hex")?,
-            gate_id: hex_arr::<GATE_ID_LEN>(&raw.gate_id_hex, "gate_id_hex")?,
+            gate_id: match raw.gate_id_hex {
+                Some(h) => Some(hex_arr::<GATE_ID_LEN>(&h, "gate_id_hex")?),
+                None => None,
+            },
             bpf_object: raw.bpf_object,
             pinhole_ms: raw.pinhole_ms,
             skew_seconds: raw.skew_seconds,

@@ -546,7 +546,7 @@ mod tests {
 
     /// Cross-impl interop contract: the thumbprint is SHA-256 of these EXACT
     /// public-key bytes — Ed25519 = 32-byte raw key, P-256 = 65-byte uncompressed
-    /// point (0x04‖X‖Y). Argus hashes the same bytes; if aws-lc-rs ever changed
+    /// point (0x04‖X‖Y). The control plane hashes the same bytes; if aws-lc-rs ever changed
     /// the encoding (compressed point / DER SPKI), thumbprints would silently
     /// stop matching. Pin it.
     #[test]

@@ -54,13 +54,13 @@ echo "== gate key + standalone client identity =="
 cd "$WORK"
 "$CLI" keygen gate >/dev/null
 PUB=$("$CLI" gen-client cli | grep public_key_hex | cut -d= -f2)
-# Thumbprint = SHA-256(raw pubkey bytes) — the cross-impl contract Argus uses.
+# Thumbprint = SHA-256(raw pubkey bytes) — the cross-impl contract the control plane uses.
 THUMB=$(printf %s "$PUB" | xxd -r -p | sha256sum | cut -d' ' -f1)
 
 GATE_PUB=$(grep '^gate_pubkey_hex=' gate.knock | cut -d= -f2)
 GATE_ID=$(grep '^gate_id_hex=' gate.knock | cut -d= -f2)
 
-# What Argus surfaces as the gate's client descriptor (ports = policy-allowed).
+# What the control plane surfaces as the gate's client descriptor (ports = policy-allowed).
 cat > descriptor.json <<EOF
 { "gate_id_hex": "$GATE_ID",
   "gate_pubkey_hex": "$GATE_PUB",

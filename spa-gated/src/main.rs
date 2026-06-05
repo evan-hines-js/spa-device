@@ -19,7 +19,7 @@ use aya::maps::{Array as BpfArray, HashMap as BpfHashMap, MapData};
 use aya::programs::{Xdp, XdpFlags};
 use aya::Ebpf;
 
-use spa_common::Suite;
+use spa_common::{Suite, GATE_ID_LEN};
 use spa_core::{Config as GateConfig, Gatekeeper};
 use spa_crypto::GateKeypair;
 use spa_ebpf_common::{GateConfig as KernelConfig, Grant};
@@ -28,8 +28,14 @@ use adapters::{BpfGateWriter, MemReplay, SharedTrust, SystemClock};
 use config::{ClientEntry, Config, TokenEntry};
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let path = std::env::args()
-        .nth(1)
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("provision") {
+        return provision(&args[2..]);
+    }
+
+    let path = args
+        .get(1)
+        .cloned()
         .unwrap_or_else(|| "/etc/spa/gated.toml".to_string());
     let cfg = Config::load(&path)?;
 
@@ -51,22 +57,42 @@ fn main() -> Result<(), Box<dyn Error>> {
     // knock identity (derived from our keypair, never hand-grepped — so it can't
     // be the wrong key) and pull the signed bundle. Idempotent: every start
     // re-asserts the correct identity, which self-heals a stale descriptor.
+    // The bundle-signing anchor: a pinned one if configured, else the one the
+    // control plane returns at registration. The control-plane channel is already
+    // CA-pinned, so a fetched anchor is as trustworthy as a manual pin — and it
+    // can't go stale across a control-plane re-key, which a hand-pinned one does.
+    let mut anchor = cfg.config_anchor.clone();
+    let mut gate_id = cfg.gate_id;
     if let Some(cp) = &cfg.control_plane {
         // Pin the control-plane TLS to our aws-lc-rs provider (no second stack).
         let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
         let pubkey_hex =
             hex::encode(GateKeypair::from_raw_private(cfg.suite, &cfg.gate_private)?.public_key());
-        cp::register_identity(cp, &pubkey_hex, cfg.knock_port)?;
+        let provisioned = cp::register_identity(cp, &pubkey_hex, cfg.knock_port)?;
         audit::control_plane("registered", pubkey_hex);
+        if anchor.is_none() {
+            if let Some(a) = &provisioned.config_anchor {
+                anchor =
+                    Some(hex::decode(a).map_err(|e| format!("control-plane config_anchor: {e}"))?);
+                audit::control_plane("anchor-fetched", a.clone());
+            }
+        }
+        if gate_id.is_none() {
+            if let Some(g) = &provisioned.gate_id {
+                gate_id = Some(parse_gate_id(g)?);
+                audit::control_plane("gate-id-fetched", g.clone());
+            }
+        }
         if let Some(bpath) = &cfg.bundle_path {
             cp::fetch_bundle(cp, bpath)?;
             audit::control_plane("bundle-fetched", bpath.clone());
         }
     }
+    let gate_id = gate_id.ok_or("no gate_id: set gate_id_hex, or configure [control_plane]")?;
 
     // Dynamic policy: from a signed bundle if configured, else inline config.
-    let bundle_src = match (&cfg.config_anchor, &cfg.bundle_path) {
-        (Some(anchor), Some(bpath)) => Some((anchor.clone(), bpath.clone())),
+    let bundle_src = match (&anchor, &cfg.bundle_path) {
+        (Some(a), Some(bpath)) => Some((a.clone(), bpath.clone())),
         _ => None,
     };
     let (clients, tokens, ports, generation): (Vec<ClientEntry>, Vec<TokenEntry>, Vec<u16>, u64) =
@@ -85,7 +111,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         };
 
     // Load + attach the XDP program.
-    let mut ebpf = Ebpf::load(&std::fs::read(&cfg.bpf_object)?)?;
+    let object = std::fs::read(&cfg.bpf_object)
+        .map_err(|e| format!("reading bpf_object {}: {e}", cfg.bpf_object))?;
+    let mut ebpf = Ebpf::load(&object)?;
     {
         let prog: &mut Xdp = ebpf
             .program_mut("spa_gate")
@@ -137,7 +165,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     trust.set_tokens(&tokens);
     let replay = MemReplay::new(Duration::from_secs(cfg.skew_seconds * 2 + 1));
     let gate_cfg = GateConfig {
-        gate_id: cfg.gate_id,
+        gate_id,
         skew_nanos: cfg.skew_seconds.saturating_mul(1_000_000_000),
         pinhole_nanos: cfg.pinhole_ms.saturating_mul(1_000_000),
     };
@@ -201,6 +229,76 @@ fn main() -> Result<(), Box<dyn Error>> {
         let decision = gatekeeper.admit(&buf[..n], src.ip());
         audit::knock(src.ip(), &decision);
     }
+}
+
+/// `spa-gated provision <interface> <bpf_object> <control-plane-url> <gate-token>
+/// <gate-address> [ca_cert]` — generate this gate's knock key and write a ready
+/// `gated.toml`, so the key is never made + pasted by hand. `gate_id` and the
+/// config anchor are deliberately omitted: a self-provisioning gate fetches both
+/// from the control plane at first run, so they can't be pinned wrong or go stale.
+/// Env overrides: `SPA_SUITE` (modern), `SPA_KNOCK_PORT` (62201), `SPA_GATED_TOML`
+/// (gated.toml).
+fn provision(args: &[String]) -> Result<(), Box<dyn Error>> {
+    let usage = "usage: provision <interface> <bpf_object> <control-plane-url> <gate-token> <gate-address> [ca_cert]";
+    let interface = args.first().ok_or(usage)?;
+    let bpf_object = args.get(1).ok_or(usage)?;
+    let url = args.get(2).ok_or(usage)?;
+    let token = args.get(3).ok_or(usage)?;
+    let address = args.get(4).ok_or(usage)?;
+    let ca_cert = args.get(5);
+
+    let suite_name = std::env::var("SPA_SUITE").unwrap_or_else(|_| "modern".to_string());
+    let suite = match suite_name.as_str() {
+        "fips" => Suite::Fips,
+        "modern" => Suite::Modern,
+        other => return Err(format!("unknown suite {other:?} (fips|modern)").into()),
+    };
+    let knock_port: u16 = std::env::var("SPA_KNOCK_PORT")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(62201);
+    let out = std::env::var("SPA_GATED_TOML").unwrap_or_else(|_| "gated.toml".to_string());
+
+    let (_, gate_private) = GateKeypair::generate_raw(suite)?;
+    let gate_private_hex = hex::encode(gate_private);
+    let ca_line = ca_cert
+        .map(|c| format!("ca_cert    = \"{c}\"\n"))
+        .unwrap_or_default();
+
+    let toml = format!(
+        "interface = \"{interface}\"\n\
+         knock_port = {knock_port}\n\
+         bpf_object = \"{bpf_object}\"\n\
+         pinhole_ms = 2000\n\
+         skew_seconds = 2\n\
+         bundle_path = \"/etc/spa/bundle.spa\"\n\
+         suite = \"{suite_name}\"\n\
+         gate_private_hex = \"{gate_private_hex}\"\n\
+         \n\
+         [control_plane]\n\
+         url        = \"{url}\"\n\
+         gate_token = \"{token}\"\n\
+         address    = \"{address}\"\n\
+         {ca_line}"
+    );
+    std::fs::write(&out, toml).map_err(|e| format!("writing {out}: {e}"))?;
+    println!("wrote {out} — key generated; gate_id + anchor are fetched at first run. Run it: sudo spa-gated {out}");
+    Ok(())
+}
+
+/// Decode a hex `gate_id` from the control plane into the fixed-size id.
+fn parse_gate_id(hex: &str) -> Result<[u8; GATE_ID_LEN], Box<dyn Error>> {
+    let bytes = hex::decode(hex).map_err(|e| format!("control-plane gate_id: {e}"))?;
+    if bytes.len() != GATE_ID_LEN {
+        return Err(format!(
+            "control-plane gate_id: expected {GATE_ID_LEN} bytes, got {}",
+            bytes.len()
+        )
+        .into());
+    }
+    let mut id = [0u8; GATE_ID_LEN];
+    id.copy_from_slice(&bytes);
+    Ok(id)
 }
 
 /// Best-effort detach of any leftover XDP program on `iface` before we attach,

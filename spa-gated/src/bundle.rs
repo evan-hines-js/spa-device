@@ -37,7 +37,7 @@ struct RawBundle {
 
 /// Read, verify (signature against `anchor_pubkey`), and parse a bundle file.
 pub fn load_verify(path: &str, anchor_pubkey: &[u8]) -> Result<Bundle, Box<dyn Error>> {
-    let data = std::fs::read(path)?;
+    let data = std::fs::read(path).map_err(|e| format!("reading bundle {path}: {e}"))?;
     if data.len() < SIG_LEN {
         return Err("bundle shorter than its signature".into());
     }

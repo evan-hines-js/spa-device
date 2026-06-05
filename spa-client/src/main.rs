@@ -12,6 +12,9 @@
 
 use std::error::Error;
 use std::fs;
+use std::io::ErrorKind;
+use std::net::{TcpStream, ToSocketAddrs};
+use std::time::{Duration, Instant};
 
 use spa_client::{parse_suite, Enroller, Knocker};
 use spa_common::{Suite, GATE_ID_LEN, THUMBPRINT_LEN};
@@ -148,8 +151,68 @@ fn knock_descriptor(
         format!("{address}:{knock_port}")
     };
     knocker.knock(&target, &ports)?;
-    println!("sent knock to {target} (requesting ports {ports:?})");
+
+    // The knock is fire-and-forget UDP and the gate never acks (it stays dark),
+    // so the pinhole opens asynchronously a moment later. Rather than guess a
+    // sleep and hand the race to the caller, confirm it ourselves: probe the
+    // port until the SYN actually gets through, then return. Now `knock`
+    // returning means the port is genuinely open.
+    if let Some(&port) = ports.first() {
+        confirm_open(address, port)?;
+        println!("knock to {target} — port {port} confirmed open (requested {ports:?})");
+    } else {
+        println!("sent knock to {target} (requesting ports {ports:?})");
+    }
     Ok(())
+}
+
+/// Block until the gate has opened the pinhole, by probing `address:port`.
+///
+/// A successful connect — *or* a connection refused (the SYN reached the host;
+/// nothing happens to be listening) — both mean the pinhole is open. A timeout
+/// means the port is still dark (SYN XDP-dropped), so we retry until the window
+/// elapses. This turns "knock and hope" into "knock and confirm": on return the
+/// port is reachable, eliminating the SYN-vs-pinhole race for the caller.
+///
+/// Tunables: `SPA_KNOCK_CONFIRM_MS` (max wait, default 1500); `SPA_KNOCK_NO_CONFIRM=1`
+/// to skip (e.g. for UDP-only services that can't be TCP-probed).
+fn confirm_open(address: &str, port: u16) -> Result<(), Box<dyn Error>> {
+    if std::env::var("SPA_KNOCK_NO_CONFIRM").is_ok() {
+        return Ok(());
+    }
+
+    let host = if address.contains(':') {
+        format!("[{address}]:{port}")
+    } else {
+        format!("{address}:{port}")
+    };
+    let addr = host
+        .to_socket_addrs()?
+        .next()
+        .ok_or("confirm: could not resolve target")?;
+
+    let window = std::env::var("SPA_KNOCK_CONFIRM_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(1500);
+    let deadline = Instant::now() + Duration::from_millis(window);
+
+    loop {
+        match TcpStream::connect_timeout(&addr, Duration::from_millis(50)) {
+            // Open and listening, or open but no listener (RST) — both = pinhole up.
+            Ok(_) => return Ok(()),
+            Err(e) if e.kind() == ErrorKind::ConnectionRefused => return Ok(()),
+            // Still dark (timeout): retry until the window elapses.
+            Err(_) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(5)),
+            Err(e) => {
+                return Err(format!(
+                    "knock sent but {addr} never opened within {window}ms \
+                     (denied/rate-limited/stale descriptor?): {e}"
+                )
+                .into())
+            }
+        }
+    }
 }
 
 fn parse_ports(s: &str) -> Result<Vec<u16>, Box<dyn Error>> {

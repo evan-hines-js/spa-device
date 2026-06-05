@@ -109,6 +109,16 @@ services)` before it dials. The sidecar wrapper (`knock then exec <command>`)
 covers everything that can't be recompiled — it sends the packet, waits for the
 sub-second handoff, and `exec`s the real client. Stateless.
 
+The CLI also covers **descriptor-driven provisioning**, so a client never has to
+hand-transcribe a gate's parameters: `gen-client` mints a client identity, and
+`knock-descriptor <descriptor.json> <client.key>` knocks a real gate straight from
+the gate's published descriptor — its knock public key, gate id, suite, address,
+and policy-allowed ports. The descriptor is only the gate's *public* knock
+parameters (no secret), so any control plane can hand one out. Richer clients —
+name resolution, a TUN datapath, a fleet-wide service catalog — are **consumer
+concerns built on this library**, not part of the product, and live in the
+consuming system's tree.
+
 ### 3.4 Workspace
 
 ```
@@ -192,8 +202,8 @@ the token is burned and the port re-cloaks. From then on the endpoint uses the
 asymmetric mode with its own key. This keeps *even bootstrap* dark — there is no
 permanently-open enrollment surface — and is driven by an `external` trust
 backend (§6) that validates outstanding tokens against the control plane and
-consumes them atomically on use. See `../argus/VISION.md` for the control-plane
-side of this flow.
+consumes them atomically on use. The control-plane side of this flow (issuing and
+tracking tokens) lives in the consuming system, not in spa-device.
 
 ---
 
@@ -278,14 +288,35 @@ hot-swappable snapshot. *How* the bundle arrives is a separate, pluggable adapte
 
 - **`FileWatch` (the minimum):** watch a local signed bundle, atomically reload on
   change. Anything may write that file — control plane, a sync sidecar, GitOps.
-- **`ControlPlaneApi` (drop-in, later):** poll/stream a controller directly. Same
-  port, no change to the core.
+- **`ControlPlaneApi`:** the gate pulls its own signed bundle from the control
+  plane over HTTPS and re-pulls on an interval, so config changes (a new
+  enrollment, a revoke) land without touching the host. Same `ConfigSource` port,
+  no change to the core.
 
 **The agent trusts the signature, not the channel.** Each bundle is signed by the
 control plane; the agent verifies it against the pinned `config_anchor` before
 applying. A tampered or spoofed transport cannot inject keys or open ports, so the
 delivery mechanism can be fully untrusted. This is the shift-left principle (§ on
 trust lifecycle) applied to config itself.
+
+### Self-provisioning (optional)
+
+To remove manual key transcription, a gate may **register its own identity** with
+the control plane rather than being hand-provisioned. On start it derives its knock
+public key from its local identity key, reports it, then pulls its bundle — two
+endpoints that form the product's control-plane contract (any control plane that
+drives spa-device implements them; the gate is otherwise agnostic to what's behind
+them):
+
+- `POST /api/gate/identity` — `{ gate_id, knock_pubkey, knock_port, address }`, so
+  the control plane can publish a descriptor for authorized clients.
+- `GET  /api/gate/bundle` — returns the current signed bundle, written atomically
+  and consumed through the same `ConfigSource` port.
+
+The TLS channel may be pinned to a private CA, but trust still rests on the
+**bundle signature** (`config_anchor`), never the transport — registration cannot
+inject keys or open ports. Self-provisioning is opt-in; `FileWatch` stays the
+zero-dependency default.
 
 ### Reload safety
 

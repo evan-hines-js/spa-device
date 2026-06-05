@@ -11,7 +11,20 @@
 use std::error::Error;
 use std::time::Duration;
 
+use serde::Deserialize;
+
 use crate::config::ControlPlane;
+
+/// What the control plane returns when the gate registers its identity: the gate's
+/// assigned `gate_id` and the current bundle-signing `config_anchor` (both hex), so
+/// neither has to be hand-pinned in the config (and the anchor can't go stale).
+#[derive(Deserialize, Default)]
+pub struct Provisioned {
+    #[serde(default)]
+    pub gate_id: Option<String>,
+    #[serde(default)]
+    pub config_anchor: Option<String>,
+}
 
 fn client(cp: &ControlPlane) -> Result<reqwest::blocking::Client, Box<dyn Error>> {
     let mut b = reqwest::blocking::Client::builder()
@@ -42,22 +55,25 @@ pub fn register_identity(
     cp: &ControlPlane,
     gate_pubkey_hex: &str,
     knock_port: u16,
-) -> Result<(), Box<dyn Error>> {
+) -> Result<Provisioned, Box<dyn Error>> {
     // Fixed-shape body of hex/IP/integer values — no escaping needed.
     let body = format!(
         "{{\"public_key_hex\":\"{gate_pubkey_hex}\",\"address\":\"{}\",\"knock_port\":{knock_port}}}",
         cp.address
     );
     let url = format!("{}/api/gate/identity", cp.url.trim_end_matches('/'));
-    client(cp)?
+    let bytes = client(cp)?
         .post(url)
         .bearer_auth(&cp.gate_token)
         .header("Content-Type", "application/json")
         .body(body)
         .send()
         .and_then(reqwest::blocking::Response::error_for_status)
-        .map_err(|e| format!("register identity: {}", chain(&e)))?;
-    Ok(())
+        .map_err(|e| format!("register identity: {}", chain(&e)))?
+        .bytes()?;
+    // Lenient parse: a response without these fields just leaves the gate on its
+    // pinned config (which then errors clearly if nothing is set).
+    Ok(serde_json::from_slice(&bytes).unwrap_or_default())
 }
 
 /// Fetch the gate's signed bundle and write it to `dest` (atomic rename). Returns
