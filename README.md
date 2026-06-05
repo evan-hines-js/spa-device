@@ -190,6 +190,22 @@ endpoint that has no registered key yet — and is burned on use. Tokens may be
 carried inline in the local config or in the signed bundle (so the control plane
 can push and rotate them with the same anti-rollback hot-reload as clients).
 
+### Provisioning a client against a real gate
+
+A client knocks a real gate from its own key plus the gate's **descriptor** — the
+gate's knock public key, `gate_id`, suite, and `address:knock_port`, which the
+control plane publishes once the gate reports its identity:
+
+```sh
+spa-client gen-client me                       # -> me.client.key, prints public_key_hex
+#   register public_key_hex with the control plane (it returns the thumbprint)
+spa-client knock-descriptor descriptor.json me.client.key 22 && ssh user@<gate>
+```
+
+`gen-client` mints a standalone identity (no throwaway gate); `knock-descriptor`
+consumes the control plane's descriptor JSON so there is nothing to hand-assemble.
+`{ "gate_id_hex", "gate_pubkey_hex", "suite", "address", "knock_port" }`.
+
 ## Status
 
 Implemented and tested end-to-end: cloaking (both suites, IPv4 + IPv6), conntrack
