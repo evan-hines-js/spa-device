@@ -213,8 +213,8 @@ prefix (`me`) or the full `me.client.key`.
 
 Implemented and tested end-to-end: cloaking (both suites, IPv4 + IPv6), conntrack
 handoff, fail-closed floor, signed config bundles, in-kernel DoS hygiene,
-single-use PSK enrollment, and JSON audit logging. Eight end-to-end suites under
-[`scripts/`](scripts/) plus the unit tests all pass.
+single-use PSK enrollment, gate self-provisioning, and JSON audit logging. Eleven
+end-to-end suites under [`scripts/`](scripts/) plus the unit tests all pass.
 
 Not yet done (non-core): XDP fast-pathing of IPv6 *extension-header* packets
 (today correctly handled by the nftables floor), graceful detach, and
