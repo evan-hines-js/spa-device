@@ -14,3 +14,6 @@ descriptor.json
 # stray dev artifacts (never commit a key; root-level scratch)
 spa-agent.key
 /test.sh
+
+# local AI-tooling contract (public copy is ENGINEERING.md)
+/CLAUDE.md

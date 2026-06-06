@@ -225,8 +225,8 @@ key-rotation tooling.
 - **[DESIGN.md](DESIGN.md)** — architecture, wire format, crypto, config, threat
   model, fail-closed posture.
 - **[BUILD.md](BUILD.md)** — the Linux/eBPF build toolchain.
-- **[CLAUDE.md](CLAUDE.md)** — the engineering contract (auditable, minimal, no
-  bloat).
+- **[ENGINEERING.md](ENGINEERING.md)** — the engineering contract (auditable,
+  minimal, no bloat).
 
 ## License
 
