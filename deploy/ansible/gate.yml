@@ -7,8 +7,8 @@
 #                     the control plane, install the systemd unit, start it.
 #
 # This playbook is generic and knows nothing about any control plane: the gate's
-# one-time enrollment token and the control-plane URL/CA are inputs. (Argus, the
-# consumer, mints the token and calls this — see argus/deploy/onboard-gate.sh.)
+# one-time enrollment token and the control-plane URL/CA are inputs. The consumer
+# mints the token and supplies them.
 #
 # Required vars (‑e or inventory): gate_token, argus_url, argus_ca, spa_interface
 # One-shot example:
@@ -21,7 +21,7 @@
   gather_facts: true
   tags: [build]
   vars:
-    spa_src: "{{ ansible_env.HOME }}/spa-device"
+    spa_src: "{{ ansible_facts.env.HOME }}/spa-device"
     dist_local: "{{ playbook_dir }}/dist"
   tasks:
     - name: Build prebuilt artifacts (spa-gate.o + spa-gated-<arch>)
@@ -31,7 +31,7 @@
       environment:
         # The Rust toolchain (rustup) lives under the build user's home and isn't
         # on a non-login SSH PATH.
-        PATH: "{{ ansible_env.HOME }}/.cargo/bin:{{ ansible_env.PATH }}"
+        PATH: "{{ ansible_facts.env.HOME }}/.cargo/bin:{{ ansible_facts.env.PATH }}"
       changed_when: true
 
     - name: Fetch artifacts to the control node
@@ -41,7 +41,7 @@
         flat: true
       loop:
         - "spa-gate.o"
-        - "spa-gated-{{ ansible_architecture }}-unknown-linux-gnu"
+        - "spa-gated-{{ ansible_facts.architecture }}-unknown-linux-gnu"
         - "SHA256SUMS"
 
 - name: Install + provision the gate
@@ -51,7 +51,7 @@
   tags: [install]
   vars:
     dist_local: "{{ playbook_dir }}/dist"
-    arch: "{{ ansible_architecture }}"
+    arch: "{{ ansible_facts.architecture }}"
     spa_suite: modern
     knock_port: 62201
     gate_address: "{{ ansible_host | default(inventory_hostname) }}"
