@@ -2,6 +2,7 @@
 name = "spa-gated"
 version = "0.1.0"
 edition = "2021"
+license = "MIT OR Apache-2.0"
 
 # The SPA gate daemon (Linux-only): loads the XDP data plane, attaches it,
 # manages the BPF maps, and runs the knock-verification loop by wiring the pure

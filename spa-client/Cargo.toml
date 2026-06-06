@@ -2,6 +2,7 @@
 name = "spa-client"
 version = "0.1.0"
 edition = "2021"
+license = "MIT OR Apache-2.0"
 
 # The knock client: builds and sends the single SPA packet before a connection.
 # Cross-platform userland (no eBPF, no aya). Also provides `keygen` for test/dev

@@ -2,6 +2,7 @@
 name = "spa-ebpf"
 version = "0.1.0"
 edition = "2021"
+license = "MIT OR Apache-2.0"
 
 # The XDP data plane. Built ONLY for the BPF target (bpfel-unknown-none) on the
 # Linux build host — excluded from the workspace so the macOS userland build

@@ -2,6 +2,7 @@
 name = "spa-crypto"
 version = "0.1.0"
 edition = "2024"
+license = "MIT OR Apache-2.0"
 
 # The signcryption envelope: ephemeral ECDH -> HKDF -> AEAD, plus client
 # signing/verification. All crypto comes from aws-lc-rs (the single, FIPS-capable

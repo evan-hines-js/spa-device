@@ -2,6 +2,7 @@
 name = "spa-core"
 version = "0.1.0"
 edition = "2024"
+license = "MIT OR Apache-2.0"
 
 # The pure decision core. Depends only on the wire format; no crypto, no I/O,
 # no async. All side effects (crypto, clock, trust lookups, replay state, gate

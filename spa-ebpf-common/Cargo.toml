@@ -2,6 +2,7 @@
 name = "spa-ebpf-common"
 version = "0.1.0"
 edition = "2024"
+license = "MIT OR Apache-2.0"
 
 # POD map types shared verbatim between the XDP program (kernel, no_std) and the
 # userland loader. Kept tiny and repr(C) so both sides agree on the byte layout.
