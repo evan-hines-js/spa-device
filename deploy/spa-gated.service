@@ -1,0 +1,39 @@
+# spa-gated — host-resident SPA port-cloaking gate (persistent service).
+#
+# Replaces the transient `systemd-run --unit=spa-gate ...` used for bring-up: this
+# survives reboot and restarts on failure. The daemon polls the control plane for
+# its signed bundle and hot-reloads on change (anti-rollback), so a config/policy
+# change is picked up WITHOUT a restart — never `systemctl restart` to push a new
+# bundle.
+#
+# Install:
+#   sudo install -Dm755 spa-gated/target/release/spa-gated /usr/local/bin/spa-gated
+#   sudo install -Dm755 spa-ebpf/target/bpfel-unknown-none/release/spa-gate /usr/local/lib/spa-device/spa-gate.o
+#   sudo install -Dm600 gated.toml /etc/spa-gated/gated.toml      # bpf_object = that .o path
+#   sudo install -Dm644 deploy/spa-gated.service /etc/systemd/system/spa-gated.service
+#   sudo systemctl daemon-reload && sudo systemctl enable --now spa-gated
+#
+# Stop/restore (the fail-closed nft floor outlives a crash by design):
+#   sudo systemctl stop spa-gated && sudo nft delete table inet spa
+
+[Unit]
+Description=spa-gated — SPA port-cloaking gate
+Documentation=https://github.com/ (spa-device DESIGN.md)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/spa-gated /etc/spa-gated/gated.toml
+# XDP attach + the nftables fail-closed floor need broad net/bpf privilege.
+# Runs as root for the netlink/XDP/nft path; tighten with CAP_BPF/CAP_NET_ADMIN
+# once your kernel + setup allow an unprivileged user.
+Restart=on-failure
+RestartSec=2
+# Don't kill the daemon's grace on stop — it tears down its own XDP; the nft floor
+# is intentionally left in place (fail-closed) until an operator removes it.
+KillSignal=SIGTERM
+TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target
