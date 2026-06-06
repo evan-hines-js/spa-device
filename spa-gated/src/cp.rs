@@ -91,6 +91,9 @@ pub fn fetch_bundle(cp: &ControlPlane, dest: &str) -> Result<bool, Box<dyn Error
     if std::fs::read(dest).ok().as_deref() == Some(bytes.as_ref()) {
         return Ok(false);
     }
+    if let Some(dir) = std::path::Path::new(dest).parent() {
+        std::fs::create_dir_all(dir)?;
+    }
     let tmp = format!("{dest}.tmp");
     std::fs::write(&tmp, &bytes)?;
     std::fs::rename(&tmp, dest)?;

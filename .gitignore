@@ -17,3 +17,7 @@ spa-agent.key
 
 # local AI-tooling contract (public copy is ENGINEERING.md)
 /CLAUDE.md
+
+# ansible deploy: local env + fetched artifacts (keep .example committed)
+deploy/ansible/inventory.ini
+deploy/ansible/dist/

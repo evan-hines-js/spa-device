@@ -1,0 +1,149 @@
+# Install a spa-device gate on one or more hosts — ship-prebuilt, no toolchain on
+# the protected host (see BUILD.md "Release artifacts").
+#
+#   Play 1 (builder): build the gate artifacts on a Linux eBPF build host and
+#                     fetch them to dist/ on the control node.
+#   Play 2 (gates):   push the binary + BPF object + CA, self-provision against
+#                     the control plane, install the systemd unit, start it.
+#
+# This playbook is generic and knows nothing about any control plane: the gate's
+# one-time enrollment token and the control-plane URL/CA are inputs. (Argus, the
+# consumer, mints the token and calls this — see argus/deploy/onboard-gate.sh.)
+#
+# Required vars (‑e or inventory): gate_token, argus_url, argus_ca, spa_interface
+# One-shot example:
+#   ansible-playbook -i inventory.ini deploy/ansible/gate.yml \
+#     -e gate_token=... -e argus_url=https://10.0.0.155:4001 \
+#     -e argus_ca=~/argus/priv/cert/argus-ca.pem -e spa_interface=ens18
+---
+- name: Build gate artifacts (Linux eBPF build host)
+  hosts: builder
+  gather_facts: true
+  tags: [build]
+  vars:
+    spa_src: "{{ ansible_env.HOME }}/spa-device"
+    dist_local: "{{ playbook_dir }}/dist"
+  tasks:
+    - name: Build prebuilt artifacts (spa-gate.o + spa-gated-<arch>)
+      ansible.builtin.command:
+        cmd: ./scripts/build-gate-release.sh
+        chdir: "{{ spa_src }}"
+      environment:
+        # The Rust toolchain (rustup) lives under the build user's home and isn't
+        # on a non-login SSH PATH.
+        PATH: "{{ ansible_env.HOME }}/.cargo/bin:{{ ansible_env.PATH }}"
+      changed_when: true
+
+    - name: Fetch artifacts to the control node
+      ansible.builtin.fetch:
+        src: "{{ spa_src }}/dist/{{ item }}"
+        dest: "{{ dist_local }}/{{ item }}"
+        flat: true
+      loop:
+        - "spa-gate.o"
+        - "spa-gated-{{ ansible_architecture }}-unknown-linux-gnu"
+        - "SHA256SUMS"
+
+- name: Install + provision the gate
+  hosts: gates
+  gather_facts: true
+  become: true
+  tags: [install]
+  vars:
+    dist_local: "{{ playbook_dir }}/dist"
+    arch: "{{ ansible_architecture }}"
+    spa_suite: modern
+    knock_port: 62201
+    gate_address: "{{ ansible_host | default(inventory_hostname) }}"
+    bin_path: /usr/local/bin/spa-gated
+    obj_path: /usr/local/lib/spa-device/spa-gate.o
+    etc_dir: /etc/spa-gated
+    ca_path: /etc/spa-gated/argus-ca.pem
+    toml_path: /etc/spa-gated/gated.toml
+    unit_src: "{{ playbook_dir }}/../spa-gated.service"
+    gate_reprovision: false
+  tasks:
+    - name: Require the inputs the gate can't derive
+      ansible.builtin.assert:
+        that:
+          - gate_token is defined and gate_token | length > 0
+          - argus_url is defined and argus_url | length > 0
+          - argus_ca is defined
+          - spa_interface is defined and spa_interface | length > 0
+        fail_msg: "set gate_token, argus_url, argus_ca, spa_interface (-e ...)"
+
+    - name: Ensure the install directories exist
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: "0755"
+      loop:
+        - "{{ obj_path | dirname }}"
+        - "{{ etc_dir }}"
+
+    - name: Install the gate daemon binary
+      ansible.builtin.copy:
+        src: "{{ dist_local }}/spa-gated-{{ arch }}-unknown-linux-gnu"
+        dest: "{{ bin_path }}"
+        mode: "0755"
+      notify: restart spa-gated
+
+    - name: Install the XDP BPF object
+      ansible.builtin.copy:
+        src: "{{ dist_local }}/spa-gate.o"
+        dest: "{{ obj_path }}"
+        mode: "0755"
+      notify: restart spa-gated
+
+    - name: Install the control-plane CA the gate verifies against
+      ansible.builtin.copy:
+        src: "{{ argus_ca }}"
+        dest: "{{ ca_path }}"
+        mode: "0644"
+      notify: restart spa-gated
+
+    - name: Detect an existing provisioned config
+      ansible.builtin.stat:
+        path: "{{ toml_path }}"
+      register: gated_toml
+
+    # Re-provisioning mints a NEW knock keypair, so it's deliberately skipped once
+    # a config exists (set gate_reprovision=true to force a fresh identity).
+    - name: Self-provision the gate (generate key + write gated.toml)
+      ansible.builtin.command:
+        cmd: >-
+          {{ bin_path }} provision
+          {{ spa_interface }} {{ obj_path }} {{ argus_url }}
+          {{ gate_token }} {{ gate_address }} {{ ca_path }}
+      environment:
+        SPA_GATED_TOML: "{{ toml_path }}"
+        SPA_SUITE: "{{ spa_suite }}"
+        SPA_KNOCK_PORT: "{{ knock_port | string }}"
+      when: gate_reprovision | bool or not gated_toml.stat.exists
+      notify: restart spa-gated
+
+    - name: Lock down the config (holds the gate private key + token)
+      ansible.builtin.file:
+        path: "{{ toml_path }}"
+        mode: "0600"
+
+    - name: Install the systemd unit
+      ansible.builtin.copy:
+        src: "{{ unit_src }}"
+        dest: /etc/systemd/system/spa-gated.service
+        mode: "0644"
+      notify: restart spa-gated
+
+    - name: Enable + start the gate
+      ansible.builtin.systemd_service:
+        name: spa-gated
+        enabled: true
+        state: started
+        daemon_reload: true
+
+  handlers:
+    - name: restart spa-gated
+      ansible.builtin.systemd_service:
+        name: spa-gated
+        state: restarted
+        daemon_reload: true
