@@ -27,6 +27,15 @@ use spa_ebpf_common::{GateConfig as KernelConfig, Grant};
 use adapters::{BpfGateWriter, MemReplay, SharedTrust, SystemClock};
 use config::{ClientEntry, Config, TokenEntry};
 
+/// How long an admitted source stays open after a knock. This is the gate's call,
+/// not the control plane's — it's a data-plane timing constant, so there is no knob
+/// to misconfigure. It must outlast the longest gap between a client's packets to a
+/// cloaked control plane: the OpenZiti tunneler re-polls its controller about every
+/// 25s, so a shorter pinhole would drop that poll and tear the channel down. 30s is
+/// the minimum that reliably survives it. Established flows are kept open past this
+/// by the conntrack handoff, so steady traffic never needs a re-knock.
+const PINHOLE_NANOS: u64 = 30_000 * 1_000_000;
+
 fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<String> = std::env::args().collect();
     if args.get(1).map(String::as_str) == Some("provision") {
@@ -167,7 +176,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let gate_cfg = GateConfig {
         gate_id,
         skew_nanos: cfg.skew_seconds.saturating_mul(1_000_000_000),
-        pinhole_nanos: cfg.pinhole_ms.saturating_mul(1_000_000),
+        pinhole_nanos: PINHOLE_NANOS,
     };
     let mut gatekeeper = Gatekeeper::new(
         gate_cfg,
@@ -269,7 +278,6 @@ fn provision(args: &[String]) -> Result<(), Box<dyn Error>> {
         "interface = \"{interface}\"\n\
          knock_port = {knock_port}\n\
          bpf_object = \"{bpf_object}\"\n\
-         pinhole_ms = 2000\n\
          skew_seconds = 2\n\
          bundle_path = \"/etc/spa/bundle.spa\"\n\
          suite = \"{suite_name}\"\n\

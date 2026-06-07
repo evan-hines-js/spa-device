@@ -21,8 +21,6 @@ struct Raw {
     #[serde(default)]
     gate_id_hex: Option<String>,
     bpf_object: String,
-    #[serde(default = "default_pinhole")]
-    pinhole_ms: u64,
     #[serde(default = "default_skew")]
     skew_seconds: u64,
     #[serde(default = "default_true")]
@@ -70,9 +68,6 @@ pub(crate) struct RawToken {
     pub ports: Vec<u16>,
 }
 
-fn default_pinhole() -> u64 {
-    400
-}
 fn default_skew() -> u64 {
     2
 }
@@ -116,7 +111,6 @@ pub struct Config {
     /// control plane at registration (so it can't be hand-pinned wrong).
     pub gate_id: Option<[u8; GATE_ID_LEN]>,
     pub bpf_object: String,
-    pub pinhole_ms: u64,
     pub skew_seconds: u64,
     pub nftables_floor: bool,
     /// Pinned control-plane signing public key (Ed25519) for verifying bundles.
@@ -151,7 +145,6 @@ impl Config {
                 None => None,
             },
             bpf_object: raw.bpf_object,
-            pinhole_ms: raw.pinhole_ms,
             skew_seconds: raw.skew_seconds,
             nftables_floor: raw.nftables_floor,
             config_anchor,
